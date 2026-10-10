@@ -2,6 +2,7 @@
   "name": "objectlens",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Web file explorer for S3-compatible object storage: browse, upload, download, copy, move, delete, and inspect object properties, metadata, tags, versions and bucket configuration",
   "engines": {
