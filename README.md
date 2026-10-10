@@ -3,6 +3,11 @@
 A file explorer for S3 and S3-compatible object storage (AWS S3, RustFS, MinIO, Ceph RGW, Garage,
 Cloudflare R2, …) that runs on your own machine and opens in the browser.
 
+> [!NOTE]
+> This project was created with [Anthropic Claude Opus 5.5](https://www.anthropic.com/claude).
+
+![ObjectLens: a folder of a bucket, with the properties of a CSV file open](docs/screenshot.png)
+
 - **Browse** buckets and folders, page through large folders, sort, filter, and search a whole
   subtree by name.
 - **Read and write**: upload files and whole folders (drag and drop, multipart, with progress),
@@ -144,3 +149,7 @@ sha256sum -c objectlens.tar.xz.sha256
 ```
 
 Design decisions are in [DECISIONS.md](DECISIONS.md).
+
+## License
+
+[MIT](LICENSE)

@@ -34,6 +34,7 @@ ARG REVISION=unknown
 LABEL org.opencontainers.image.title="objectlens" \
       org.opencontainers.image.description="Web file explorer for S3-compatible object storage" \
       org.opencontainers.image.source="https://github.com/sebastka/objectlens" \
+      org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.revision="${REVISION}"
 
 # 0.0.0.0 inside the container; the host decides who can reach it (-p 127.0.0.1:3000:3000).
