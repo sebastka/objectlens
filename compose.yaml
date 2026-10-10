@@ -1,0 +1,38 @@
+# Local S3 for development and the integration tests (ObjectLens itself runs with `npm run dev`):
+#   npm run dev:s3     RustFS on ${CONTAINER_HOST_ADDRESS:-127.0.0.1}:9400, then demo buckets and a
+#                      read-only user (s3-init; safe to rerun)
+# Images are pinned by digest (multi-arch index), the same as in .github/workflows/release.yaml.
+services:
+  s3:
+    image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${DEV_S3_ACCESS_KEY:-objectlens}
+      RUSTFS_SECRET_KEY: ${DEV_S3_SECRET_KEY:-objectlens-secret}
+    ports:
+      - '${CONTAINER_HOST_ADDRESS:-127.0.0.1}:${DEV_S3_PORT:-9400}:9000'
+    volumes:
+      - s3-data:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-sf', 'http://127.0.0.1:9000/health']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: demo buckets and the read-only user "reader" (dev/s3-init.sh).
+  s3-init:
+    image: rustfs/rc:v0.1.36@sha256:ab024bfebee49a750ce886b4c70963ccd9ddaa03f491704a90710641d7a26699
+    profiles: [init]
+    depends_on:
+      s3:
+        condition: service_healthy
+    environment:
+      S3_URL: http://s3:9000
+      S3_ACCESS_KEY: ${DEV_S3_ACCESS_KEY:-objectlens}
+      S3_SECRET_KEY: ${DEV_S3_SECRET_KEY:-objectlens-secret}
+    entrypoint: ['sh', '/s3-init.sh']
+    volumes:
+      - ./dev/s3-init.sh:/s3-init.sh:ro
+
+volumes:
+  s3-data:

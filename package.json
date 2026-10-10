@@ -1,0 +1,55 @@
+{
+  "name": "objectlens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web file explorer for S3-compatible object storage: browse, upload, download, copy, move, delete, and inspect object properties, metadata, tags, versions and bucket configuration",
+  "engines": {
+    "node": ">=26.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node --watch --env-file-if-exists=.env src/server/index.ts",
+    "dev:web": "vite",
+    "dev:s3": "docker compose up -d --wait s3 && docker compose run --rm s3-init",
+    "build": "vite build",
+    "start": "node --env-file-if-exists=.env src/server/index.ts",
+    "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.web.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node --env-file-if-exists=.env --test \"test/**/*.test.ts\"",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
+    "bundle": "bash scripts/bundle.sh",
+    "docker:build": "docker build -t objectlens:local ."
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1149.0",
+    "@aws-sdk/lib-storage": "^3.1149.0",
+    "@aws-sdk/s3-request-presigner": "^3.1149.0",
+    "@hono/node-server": "^2.1.4",
+    "@smithy/node-http-handler": "^4.12.1",
+    "hono": "^4.13.13",
+    "openid-client": "^6.8.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^10.0.6",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.10",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.71.1",
+    "vite": "^8.3.4"
+  }
+}
