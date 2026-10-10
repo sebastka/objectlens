@@ -235,16 +235,35 @@ capability of a connection is tracked **per bucket and folder** (`src/server/cap
   tests against RustFS started with `npm run dev:s3`, build), then a signed release archive
   (cosign keyless, SHA-256), then a multi-arch image on GHCR with SBOM and provenance, signed.
   Dependabot with grouped action updates and auto-merge of minor/patch updates.
-- **Branch ⚠️:** the workflow triggers on pushes to **`main`** (this repository's recorded main
-  branch). The local branch is still `master` with no commits: `git branch -m master main`
-  before the first push, or change `push: {branches: [main]}`.
-- **Repository settings to copy from MailWatch** (not done; I have no access): the ruleset on
-  the default branch (no deletion or force push, PRs with 0 approvals, required check
-  "Check (tsc + eslint + prettier + tests) & build", squash only), "Allow auto-merge", "Allow
-  GitHub Actions to approve pull requests", and the `DHI_USERNAME` variable plus `DHI_TOKEN`
-  secret for Actions and Dependabot.
+- **Branch:** the default branch is `master`, as in MailWatch; the release runs on pushes to it.
+  (The first version triggered on `main` by mistake, so the initial push built no release.)
 
-### D19. What I verified, and what not ⚠️
+### D19. GitHub repository rules
+
+Copied from MailWatch:
+
+- **Ruleset "master"** (on the default branch):
+  - no deletion and no force push;
+  - changes go through a pull request, with **0 required approvals** (GitHub does not let you
+    approve your own PRs), stale approvals dismissed on push;
+  - the **"Check (tsc + eslint + prettier + tests) & build"** job must pass; only the GitHub
+    Actions app may report it;
+  - squash merge only.
+- **Admins bypass the ruleset**, so you can still push to `master` directly. Remove the bypass
+  to force every change through a PR.
+- **"Require branches to be up to date" is off**, so a merge does not force every open
+  Dependabot PR to rebase and rerun CI.
+- **Dependabot:** `dependabot-auto-merge.yml` approves minor and patch updates and enables
+  auto-merge; majors wait for you. This needs "Allow auto-merge" and "Allow GitHub Actions to
+  approve pull requests" (both on; the second was off at first, which failed the first
+  Dependabot PR). `DHI_USERNAME`/`DHI_TOKEN` are a repository variable and secrets for Actions
+  and Dependabot.
+- **Other settings:** merged branches are deleted automatically, the "Update branch" button is
+  shown, the squash commit takes the PR title and body, merge commits and rebase merges are
+  disabled. The default `GITHUB_TOKEN` permission stays **read-only**; both workflows declare
+  the permissions they need.
+
+### D20. What I verified, and what not ⚠️
 
 - **Verified:** `npm run check` (typecheck, ESLint, Prettier, 32 tests, 15 of them against
   RustFS, including copies and deletes over a tiny `BULK_LIMIT`: uploads, ranges, conflicts, preview headers, metadata/tags, versions and restore,
@@ -252,8 +271,9 @@ capability of a connection is tracked **per bucket and folder** (`src/server/cap
   bucket details, probes leaving nothing behind, the read-only user, `READ_ONLY`); a browser
   walk-through in Chromium (new folder, upload, rename with F2, text editing, metadata, tags,
   share link, move to another bucket, delete, search, the `dropbox` user's greyed-out actions),
-  light and dark, desktop and phone width; the Docker image with the public `node:26-alpine`
-  base swapped in (health check, UI, Host guard).
+  light and dark, desktop and phone width; the Docker image on the hardened `dhi.io` base
+  (healthy, uid 1000, read-only root filesystem, UI served); the GitHub check job and
+  Dependabot auto-merge (PR #1).
 - **An independent review** (a second Claude agent, read-only) then found 12 problems, all
   fixed, the first three with new tests:
   - a folder copy over `BULK_LIMIT` could never finish (each run started over): now resumable,
@@ -272,8 +292,8 @@ capability of a connection is tracked **per bucket and folder** (`src/server/cap
     version listing;
   - deleting all versions of one key scanned every key starting with its name.
 - **Not verified:** AWS S3 itself (no credentials here; in particular the write probe's
-  assumption, D4), other S3-compatible servers (Ceph, Garage, R2, MinIO), the image on the
-  hardened `dhi.io` base (needs a login), the GitHub workflows, files over 5 GiB (the multipart
+  assumption, D4), other S3-compatible servers (Ceph, Garage, R2, MinIO), the release and image
+  jobs (not run yet, see D18), files over 5 GiB (the multipart
   copy path), and the ACL carry-over (RustFS accepts `PutObjectAcl` but keeps no grants).
 
 ## Ideas not implemented

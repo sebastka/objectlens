@@ -126,7 +126,7 @@ stripping), the AWS SDK v3. No database.
 
 ## Releases
 
-Every push to `main` builds, after the checks:
+Every push to `master` builds, after the checks:
 
 - a signed release archive (`objectlens.tar.xz`, cosign keyless + SHA-256) with the same `/app`
   layout as the image; run it with `node src/server/index.ts` on Node 26;
