@@ -29,7 +29,7 @@
     "@aws-sdk/client-s3": "^3.1152.0",
     "@aws-sdk/lib-storage": "^3.1152.0",
     "@aws-sdk/s3-request-presigner": "^3.1152.0",
-    "@hono/node-server": "^2.1.4",
+    "@hono/node-server": "^2.1.5",
     "@smithy/node-http-handler": "^4.12.1",
     "hono": "^4.13.13",
     "openid-client": "^6.8.8"
