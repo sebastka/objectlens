@@ -1,6 +1,12 @@
 import { useMemo, useState } from 'react';
 import { previewKind } from '../../shared/preview.ts';
-import type { ConnectionInfo, KopiaEntry, KopiaSnapshot, KopiaStatus } from '../../shared/types.ts';
+import type {
+  ConnectionInfo,
+  KopiaEntry,
+  KopiaPasswordSource,
+  KopiaSnapshot,
+  KopiaStatus,
+} from '../../shared/types.ts';
 import { api, kopiaFileUrl } from '../api.ts';
 import { Icon } from '../components/icons.tsx';
 import { Drawer, ErrorBanner, InfoBanner, KV, Spinner } from '../components/ui.tsx';
@@ -33,6 +39,12 @@ function modeString(type: string, mode: string | null): string {
     exec(0o001, 0o1000, 't', 'T')
   );
 }
+
+/** "0755" from kopia's mode, which may carry Go's file type bits ("020000755"). */
+const octalPermissions = (mode: string) => {
+  const m = Number.parseInt(mode, 8);
+  return Number.isFinite(m) ? `0${(m & 0o7777).toString(8).padStart(3, '0')}` : mode;
+};
 
 /** "4 min", "2 h 5 min" between two ISO times. */
 function duration(from: string, to: string | null): string {
@@ -69,6 +81,7 @@ export function KopiaView({
   textBytes,
   onGo,
   onObjects,
+  onVelero,
 }: {
   conn: ConnectionInfo;
   bucket: string;
@@ -80,6 +93,8 @@ export function KopiaView({
   textBytes: number;
   onGo: Go;
   onObjects: () => void;
+  /** Opens a Velero backup location (for repositories under its kopia/ folder). */
+  onVelero: (location: string) => void;
 }) {
   const [version, setVersion] = useState(0);
   const status = useAsync(() => api.kopiaStatus(conn.id, bucket, prefix), [conn.id, bucket, prefix, version]);
@@ -118,6 +133,17 @@ export function KopiaView({
           )}
         </nav>
         <div className="inline">
+          {st?.velero && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => onVelero(prefix.replace(/kopia\/[^/]+\/$/, ''))}
+              title="The Velero backups of this location"
+            >
+              <Icon name="server" />
+              Velero backups
+            </button>
+          )}
           <button type="button" className="btn" onClick={onObjects}>
             <Icon name="folder" />
             Objects
@@ -144,6 +170,12 @@ export function KopiaView({
         <Unlock conn={conn} bucket={bucket} prefix={prefix} status={st} onUnlocked={() => setVersion((v) => v + 1)} />
       )}
       {st?.installed && !st.locked && st.error && <ErrorBanner>{st.error}</ErrorBanner>}
+      {st?.installed && !st.locked && st.warning && (
+        <div className="banner banner-warn" role="alert">
+          <Icon name="lock" />
+          <div>{st.warning}</div>
+        </div>
+      )}
       {st?.installed && !st.locked && !st.error && (
         <>
           {!snapshot && <RepositoryInfo status={st} />}
@@ -207,15 +239,27 @@ function Unlock({
       <h2>
         <Icon name="lock" /> Repository password
       </h2>
-      {status.passwordSource === 'env' && status.error ? (
-        <ErrorBanner>The password from the configuration does not open this repository: {status.error}</ErrorBanner>
-      ) : (
-        <p className="muted small">
-          kopia encrypts everything in the repository. The password is kept in ObjectLens' memory only (never on disk)
-          until it restarts or you lock the repository; it can also be set as{' '}
-          <span className="mono">S3_n_KOPIA_PASSWORD</span>.
-        </p>
+      {status.error && (
+        <ErrorBanner>
+          {status.velero
+            ? "Neither S3_n_VELERO_PASSWORD nor Velero's default password opens this repository"
+            : 'The password from the configuration does not open this repository'}
+          : {status.error}
+        </ErrorBanner>
       )}
+      <p className="muted small">
+        kopia encrypts everything in the repository. The password is kept in ObjectLens' memory only (never on disk)
+        until it restarts or you lock the repository; it can also be set as{' '}
+        <span className="mono">{status.velero ? 'S3_n_VELERO_PASSWORD' : 'S3_n_KOPIA_PASSWORD'}</span>
+        {status.velero && (
+          <>
+            {' '}
+            (Velero keeps it in the secret <span className="mono">velero-repo-credentials</span>, key{' '}
+            <span className="mono">repository-password</span>)
+          </>
+        )}
+        .
+      </p>
       <div className="inline">
         <input
           type="password"
@@ -235,14 +279,20 @@ function Unlock({
   );
 }
 
+const PASSWORD_SOURCES: Record<KopiaPasswordSource, string> = {
+  ui: 'the UI',
+  env: 'S3_n_KOPIA_PASSWORD',
+  'velero-env': 'S3_n_VELERO_PASSWORD',
+  'velero-default': "Velero's default",
+};
+
 function RepositoryInfo({ status }: { status: KopiaStatus }) {
   return (
     <details className="card collapsible">
       <summary>
         <b>kopia repository</b>{' '}
         <span className="muted small">
-          read-only · kopia {status.kopiaVersion} · password from{' '}
-          {status.passwordSource === 'env' ? 'the configuration' : 'the UI'}
+          read-only · kopia {status.kopiaVersion} · password from {PASSWORD_SOURCES[status.passwordSource ?? 'ui']}
         </span>
       </summary>
       <KV rows={(status.repository ?? []).map((r): [string, string] => [r.label, r.value])} />
@@ -665,7 +715,10 @@ function FileDrawer({
           ['Source', `${snapshot.source.user}@${snapshot.source.host}`],
           ['Size', entry.size !== null ? `${bytes(entry.size)} (${exactBytes(entry.size)})` : null],
           ['Modified', dateTime(entry.mtime)],
-          ['Permissions', entry.mode ? `${modeString(entry.type, entry.mode)} (${entry.mode})` : null],
+          [
+            'Permissions',
+            entry.mode ? `${modeString(entry.type, entry.mode)} (${octalPermissions(entry.mode)})` : null,
+          ],
           ['Owner', entry.uid !== null ? `uid ${entry.uid}, gid ${entry.gid ?? '–'}` : null],
           ['Snapshot', `${dateTime(snapshot.startTime)} (${snapshot.id})`],
           ['kopia object ID', <span className="mono wrap">{entry.oid}</span>],

@@ -43,6 +43,7 @@ import type { Config, ConnectionConfig } from './config.ts';
 import { bucketDetails, inlineType, objectDetails } from './details.ts';
 import { hostGuard, sameOriginGuard } from './guard.ts';
 import { Kopia, KopiaError } from './kopia.ts';
+import { Velero } from './velero.ts';
 import { deleteIds, expand, folderSize, itemFolder, search, toEntry, transfer } from './ops.ts';
 import { copyObject, createClient, describe, unquote } from './s3.ts';
 
@@ -132,6 +133,7 @@ export function createApp(cfg: Config): Hono<Env> {
   const app = new Hono<Env>();
   const caps = new CapabilityTracker(cfg.limits.capabilityTtlMinutes);
   const kopia = new Kopia(cfg.kopia);
+  const velero = new Velero();
   const clients = new Map<string, S3Client>();
   const presigners = new Map<string, S3Client>();
   const client = (c: ConnectionConfig) => {
@@ -180,7 +182,9 @@ export function createApp(cfg: Config): Hono<Env> {
     },
   });
   app.use('*', (c, next) =>
-    /\/(download|kopia\/file)$/.test(c.req.path) ? downloadHeaders(c, next) : pageHeaders(c, next),
+    /\/(download|kopia\/file|velero\/(manifest|logs))$/.test(c.req.path)
+      ? downloadHeaders(c, next)
+      : pageHeaders(c, next),
   );
   app.use('/api/*', sameOriginGuard());
 
@@ -217,16 +221,26 @@ export function createApp(cfg: Config): Hono<Env> {
   };
   const track = <T>(c: Context<Env>, prefix: string, cap: CapKey, fn: () => Promise<T>) =>
     caps.track(c.get('conn').id, c.req.param('bucket') ?? '', prefix, cap, fn);
+  /** Why a folder's objects must not be changed: a kopia repository or Velero's backup folders. */
+  const protectedReason = async (c: Context<Env>, folder: string): Promise<string | null> => {
+    const [s3, id, bucket] = [c.get('s3'), c.get('conn').id, c.req.param('bucket') ?? ''];
+    if (await kopia.isRepository(s3, id, bucket, folder)) {
+      return 'This folder holds a kopia repository: changing its objects would corrupt the backups.';
+    }
+    if (await velero.isManaged(s3, id, bucket, folder).catch(() => false)) {
+      return 'This folder belongs to a Velero backup location: Velero keeps its backups here (delete them with velero).';
+    }
+    return null;
+  };
   /**
-   * Refuses changes inside a folder that holds a kopia repository: a deleted, renamed or
-   * overwritten blob corrupts the backups. (Deleting the whole folder from its parent is left
-   * possible, for repositories that are really no longer wanted.)
+   * Refuses changes inside a kopia repository (a deleted, renamed or overwritten blob corrupts
+   * the backups) and in a Velero location's backups/ folders. Deleting the whole folder from its
+   * parent is left possible, for repositories that are really no longer wanted.
    */
   const notInKopia = async (c: Context<Env>, folders: string[]) => {
     for (const f of new Set(folders)) {
-      if (await kopia.isRepository(c.get('s3'), c.get('conn').id, c.req.param('bucket') ?? '', f)) {
-        throw new HttpError(403, `"${f || '/'}" holds a kopia repository: its objects are not changed by ObjectLens`);
-      }
+      const why = await protectedReason(c, f);
+      if (why) throw new HttpError(403, `"${f || '/'}": ${why}`);
     }
   };
   const audit = (c: Context<Env>, what: string) =>
@@ -308,15 +322,12 @@ export function createApp(cfg: Config): Hono<Env> {
   app.get('/api/c/:conn/b/:bucket/capabilities', async (c) => {
     const prefix = c.req.query('prefix') ?? '';
     const bucket = c.req.param('bucket');
-    const [result, isKopia] = await Promise.all([
+    const [result, why] = await Promise.all([
       caps.get(c.get('conn'), c.get('s3'), bucket, prefix),
-      kopia.isRepository(c.get('s3'), c.get('conn').id, bucket, prefix).catch(() => false),
+      protectedReason(c, prefix).catch(() => null),
     ]);
-    if (isKopia) {
-      const no = {
-        allowed: false,
-        reason: 'This folder holds a kopia repository: changing its objects would corrupt the backups.',
-      };
+    if (why) {
+      const no = { allowed: false, reason: why };
       return c.json({ ...result, write: no, delete: no, tags: no });
     }
     return c.json(result);
@@ -774,10 +785,18 @@ export function createApp(cfg: Config): Hono<Env> {
 
   const kopiaRepo = async (c: Context<Env>, prefix: string) => {
     if (prefix && !prefix.endsWith('/')) throw bad('prefix must be empty or end with "/"');
-    if (!(await kopia.isRepository(c.get('s3'), c.get('conn').id, c.req.param('bucket') ?? '', prefix))) {
+    const [s3, conn, bucket] = [c.get('s3'), c.get('conn'), c.req.param('bucket') ?? ''];
+    if (!(await kopia.isRepository(s3, conn.id, bucket, prefix))) {
       throw new HttpError(404, 'no kopia repository in this folder');
     }
-    return [c.get('conn'), c.req.param('bucket') ?? '', prefix] as const;
+    // Velero's repositories have their own password (S3_n_VELERO_PASSWORD, else Velero's default).
+    kopia.markVelero(
+      conn,
+      bucket,
+      prefix,
+      await velero.isVeleroRepository(s3, conn.id, bucket, prefix).catch(() => false),
+    );
+    return [conn, bucket, prefix] as const;
   };
 
   /** Whether the folder holds a kopia repository (one HEAD request; never runs kopia). */
@@ -834,6 +853,55 @@ export function createApp(cfg: Config): Hono<Env> {
     if (entry.size !== null) headers.set('content-length', String(entry.size));
     if (entry.mtime) headers.set('last-modified', new Date(entry.mtime).toUTCString());
     return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
+  });
+
+  // --- Velero backup locations (read-only) -----------------------------------------------
+  // `prefix` is the location's folder (holding backups/ and kopia/).
+
+  const veleroLocation = async (c: Context<Env>, prefix: string) => {
+    if (prefix && !prefix.endsWith('/')) throw bad('prefix must be empty or end with "/"');
+    const [s3, id, bucket] = [c.get('s3'), c.get('conn').id, c.req.param('bucket') ?? ''];
+    if (!(await velero.isLocation(s3, id, bucket, prefix))) throw new HttpError(404, 'no Velero backup location here');
+    return { s3, id, bucket, prefix };
+  };
+
+  /** Whether the folder is a Velero backup location (two requests; cached). */
+  app.get('/api/c/:conn/b/:bucket/velero/detect', async (c) => {
+    const location = await velero
+      .isLocation(c.get('s3'), c.get('conn').id, c.req.param('bucket'), c.req.query('prefix') ?? '')
+      .catch(() => false);
+    return c.json({ location });
+  });
+
+  app.get('/api/c/:conn/b/:bucket/velero/backups', async (c) => {
+    const l = await veleroLocation(c, c.req.query('prefix') ?? '');
+    return c.json(await velero.backups(l.s3, l.id, l.bucket, l.prefix, c.req.query('fresh') === '1'));
+  });
+
+  app.get('/api/c/:conn/b/:bucket/velero/backup', async (c) => {
+    const l = await veleroLocation(c, c.req.query('prefix') ?? '');
+    const d = await velero.backup(l.s3, l.bucket, l.prefix, str(c.req.query('name'), 'name'));
+    return d ? c.json(d) : c.json({ error: 'no such backup' }, 404);
+  });
+
+  /** Text views (a manifest of the tarball, the log): sandboxed plain text, as previews are. */
+  const textResponse = (name: string, text: string) => {
+    const headers = fileHeaders(name, { kind: 'text', type: 'text/plain; charset=utf-8' });
+    return new Response(text, { headers });
+  };
+
+  app.get('/api/c/:conn/b/:bucket/velero/manifest', async (c) => {
+    const l = await veleroLocation(c, c.req.query('prefix') ?? '');
+    const path = str(c.req.query('path'), 'path');
+    const text = await velero.manifest(l.s3, l.bucket, l.prefix, str(c.req.query('name'), 'name'), path);
+    return text === null ? c.json({ error: 'no such manifest' }, 404) : textResponse(baseName(path), text);
+  });
+
+  app.get('/api/c/:conn/b/:bucket/velero/logs', async (c) => {
+    const l = await veleroLocation(c, c.req.query('prefix') ?? '');
+    const name = str(c.req.query('name'), 'name');
+    const text = await velero.logs(l.s3, l.bucket, l.prefix, name);
+    return text === null ? c.json({ error: 'no log for this backup' }, 404) : textResponse(`${name}.log`, text);
   });
 
   app.all('/api/*', (c) => c.json({ error: 'not found' }, 404));
