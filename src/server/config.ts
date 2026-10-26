@@ -33,6 +33,8 @@ export interface ConnectionConfig {
   publicEndpoint: string | null;
   /** Password of the kopia repositories reached through this connection (KOPIA_PASSWORD[_FILE]). */
   kopiaPassword: string | null;
+  /** Password of the kopia repositories of Velero backup locations (VELERO_PASSWORD[_FILE]). */
+  veleroPassword: string | null;
 }
 
 export interface Config {
@@ -181,6 +183,7 @@ function connection(env: Env, n: number, errors: string[], ids: Set<string>): Co
     shareLinks: bool(env, `${p}SHARE_LINKS`, true, errors),
     publicEndpoint: url(env, `${p}PUBLIC_ENDPOINT`, errors),
     kopiaPassword: secret(env, `${p}KOPIA_PASSWORD`, errors),
+    veleroPassword: secret(env, `${p}VELERO_PASSWORD`, errors),
   };
 }
 

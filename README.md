@@ -30,6 +30,9 @@ Cloudflare R2, …) that runs on your own machine and opens in the browser.
   its snapshots, including the checkpoints of uploads still running; browse them, see file
   permissions and owners, preview and download files. The repository's own objects are
   protected from changes (see [kopia backups](#kopia-backups)).
+- **Velero backups** (read-only): a [Velero](https://velero.io) backup location shows its
+  backups, what each holds (resources, manifests, errors, log), and its volumes; **Browse files**
+  opens a volume's data as of that backup (see [Velero backups](#velero-backups)).
 
 Credentials stay on the server side of ObjectLens; the browser only talks to ObjectLens.
 
@@ -76,6 +79,7 @@ Connections are numbered blocks, `S3_<n>_*`:
 | `S3_n_FORCE_PATH_STYLE`                        | Path-style URLs (default on with an endpoint, off for AWS)                         |
 | `S3_n_TLS_REJECT_UNAUTHORIZED`                 | `false` accepts self-signed certificates (prefer `NODE_EXTRA_CA_CERTS`)            |
 | `S3_n_KOPIA_PASSWORD` / `…_FILE`               | Password of the kopia repositories on this connection (else typed in the UI)       |
+| `S3_n_VELERO_PASSWORD` / `…_FILE`              | Password of Velero's kopia repositories (else Velero's default, then the UI)       |
 
 Several connections to the same endpoint with different credentials are fine: each is shown
 with its own permissions.
@@ -117,6 +121,23 @@ installed where ObjectLens runs (the container image includes it; locally e.g.
 Listing snapshots and opening a folder take about a second the first time (one kopia process
 each); folders are then cached, since kopia's object IDs are content hashes. Files are streamed
 from `kopia show`: previews of large videos cannot seek.
+
+## Velero backups
+
+A folder (or bucket) with Velero's layout (`backups/<name>/velero-backup.json`) is a backup
+location: ObjectLens offers **Velero backups** there.
+
+- **Backups**: status, schedule, start, duration, expiry, items, errors and warnings, scope.
+- **A backup**: its settings, errors and warnings, log, the backed-up resources and their stored
+  manifests, and its **volumes**: data mover and file-system backups (kopia) can be browsed and
+  downloaded file by file; CSI and provider snapshots stay in the cluster and are only listed.
+  The volumes come from Velero's `volumeinfo`, or, where it is empty (data mover backups of
+  Velero 1.18), from the DataUploads stored in the backup's tarball.
+- **Volume data** lives in one kopia repository per namespace (`kopia/<namespace>/`), opened
+  read-only as above. Its password: `S3_n_VELERO_PASSWORD`, else Velero's built-in default
+  (`static-passw0rd`, with a warning: anyone who can read the bucket can then decrypt the
+  backups), else typed in the UI.
+- Velero's folders are read-only in ObjectLens; restoring is Velero's job.
 
 ## Security
 

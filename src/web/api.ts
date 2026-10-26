@@ -17,6 +17,8 @@ import type {
   SizeResponse,
   Tag,
   UploadResult,
+  VeleroBackup,
+  VeleroBackupDetails,
   VersionEntry,
 } from '../shared/types.ts';
 
@@ -194,6 +196,21 @@ export const api = {
     request<KopiaSnapshot[]>(`${bucketPath(c, b)}/kopia/snapshots${query({ prefix, fresh: fresh ? 1 : undefined })}`),
   kopiaBrowse: (c: string, b: string, prefix: string, snapshot: string, path: string) =>
     request<KopiaBrowse>(`${bucketPath(c, b)}/kopia/browse${query({ prefix, snapshot, path })}`),
+  veleroDetect: (c: string, b: string, prefix: string) =>
+    request<{ location: boolean }>(`${bucketPath(c, b)}/velero/detect${query({ prefix })}`),
+  veleroBackups: (c: string, b: string, prefix: string, fresh = false) =>
+    request<VeleroBackup[]>(`${bucketPath(c, b)}/velero/backups${query({ prefix, fresh: fresh ? 1 : undefined })}`),
+  veleroBackup: (c: string, b: string, prefix: string, name: string) =>
+    request<VeleroBackupDetails>(`${bucketPath(c, b)}/velero/backup${query({ prefix, name })}`),
+  veleroText: async (c: string, b: string, prefix: string, name: string, what: 'logs' | { manifest: string }) => {
+    const url =
+      what === 'logs'
+        ? `${bucketPath(c, b)}/velero/logs${query({ prefix, name })}`
+        : `${bucketPath(c, b)}/velero/manifest${query({ prefix, name, path: what.manifest })}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`, null, null);
+    return res.text();
+  },
   kopiaText: async (c: string, b: string, prefix: string, snapshot: string, path: string) => {
     const res = await fetch(kopiaFileUrl(c, b, prefix, snapshot, path, true));
     if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`, null, null);

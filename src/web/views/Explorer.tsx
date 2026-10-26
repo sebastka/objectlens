@@ -49,6 +49,7 @@ export function Explorer({
   onOpenObject,
   onBucketDeleted,
   onKopia,
+  onVelero,
 }: {
   conn: ConnectionInfo;
   bucket: string;
@@ -65,6 +66,8 @@ export function Explorer({
   onBucketDeleted: () => void;
   /** Opens the kopia repository of this folder. */
   onKopia: () => void;
+  /** Opens the Velero backup location of this folder. */
+  onVelero: () => void;
 }) {
   const toast = useToast();
   const [version, setVersion] = useState(0);
@@ -102,6 +105,8 @@ export function Explorer({
   const caps = useAsync(() => api.capabilities(conn.id, bucket, prefix), [conn.id, bucket, prefix, version]);
   const kopiaRepo = useAsync(() => api.kopiaDetect(conn.id, bucket, prefix), [conn.id, bucket, prefix]);
   const isKopia = kopiaRepo.data?.repository === true;
+  const veleroLocation = useAsync(() => api.veleroDetect(conn.id, bucket, prefix), [conn.id, bucket, prefix]);
+  const isVelero = veleroLocation.data?.location === true;
   const c: Capabilities | null = caps.data;
   const versioning = useAsync(() => api.versioning(conn.id, bucket), [conn.id, bucket, version]);
 
@@ -480,6 +485,19 @@ export function Explorer({
         }}
       />
 
+      {isVelero && (
+        <div className="banner banner-kopia">
+          <Icon name="server" />
+          <div className="grow">
+            <b>This folder is a Velero backup location.</b> See its backups, what they hold, and browse the files of
+            backed-up volumes. Velero's folders are read-only here.
+          </div>
+          <button type="button" className="btn btn-primary" onClick={onVelero}>
+            <Icon name="history" />
+            Velero backups
+          </button>
+        </div>
+      )}
       {isKopia ? (
         <div className="banner banner-kopia">
           <Icon name="archive" />
@@ -493,6 +511,7 @@ export function Explorer({
           </button>
         </div>
       ) : (
+        !isVelero &&
         caps.data &&
         caps.data.list.allowed !== false &&
         caps.data.write.allowed === false &&

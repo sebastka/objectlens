@@ -310,8 +310,54 @@ Copied from MailWatch:
   (files are streamed from `kopia show`, without ranges), comparing snapshots, single-file
   snapshots (shown, not browsable), and kopia's repository server protocol.
 
-### D21. What I verified, and what not ⚠️
+### D21. Velero backup locations ⚠️
 
+- **What it shows:** a folder with Velero's layout is a backup location (detected by its first
+  `backups/<name>/velero-backup.json`). Its backups (status, schedule, times, expiry, items,
+  errors, scope), and per backup: settings, errors and warnings, the log, the backed-up
+  resources with their stored manifests, and its volumes. **Browse files** opens a volume's
+  kopia snapshot in the kopia browser of D20.
+- **Where the volume list comes from:** Velero's `<name>-volumeinfo.json.gz` when it has
+  entries; otherwise the DataUploads stored in the backup's tarball (data mover) plus
+  `<name>-podvolumebackups.json.gz` (file-system backups). Velero 1.18 writes an empty
+  volumeinfo for your data mover backups, so the tarball is read: a small tar reader
+  (`src/server/tar.ts`: ustar, PAX and GNU long names, as Go writes them) instead of a
+  dependency. Each DataUpload names the namespace, the PVC and the kopia `snapshotID`; the
+  data is in `kopia/<namespace>/`.
+- **Not browsable:** CSI and provider snapshots without data movement (the data stays in the
+  cluster or with the provider; listed with a note) and restic-based file-system backups
+  (`restic/<namespace>/`, not readable with kopia).
+- **Passwords of Velero's repositories** (all share one, from the secret
+  `velero-repo-credentials`): `S3_n_VELERO_PASSWORD` (or `…_FILE`), then **Velero's built-in
+  default** (`static-passw0rd`), as you asked, then the UI. The first that opens the
+  repository is remembered. Opening with the default shows a **warning**: anyone who can read
+  the bucket can decrypt those backups; it also says when `S3_n_VELERO_PASSWORD` was tried and
+  rejected. On your cluster the configured `S3_4_VELERO_PASSWORD` is rejected and the default
+  opens the repositories I tried (deluge, paperless, syncthing): worth changing (Velero's
+  repository password applies to new repositories; existing ones need
+  `kopia repository change-password`).
+- **Protection:** `backups/` and the backup folders of a location refuse changes through
+  ObjectLens (Velero would see half a backup), like the kopia repositories under `kopia/`.
+- **Read-only:** no restores, deletions or downloads of whole volumes; restoring is Velero's
+  job (`velero restore create --from-backup`). Files of a volume can be downloaded one by one.
+- **Costs:** the backup list reads every `velero-backup.json` (a few KB each, 16 at a time,
+  cached for a minute); a backup's details read its small metadata files and its tarball
+  (cached until the tarball's ETag changes). A backup of a whole cluster has a tarball of
+  tens of MB; reading stops at 512 MB.
+
+### D22. What I verified, and what not ⚠️
+
+- **Velero (D21):** 6 more tests (45 in all): the tar reader with PAX long names, the mapping of
+  backups, DataUploads, file-system backups and volumeinfo (negative incremental sizes, restic,
+  CSI snapshots), and against RustFS a hand-made location whose namespace repository was
+  created by the real kopia CLI with Velero's default password: detection, protection of
+  `backups/` and `kopia/`, the backup list and details, the DataUpload → snapshot link without
+  duplicates from the tarball's preferred-version copies, manifests and log as sandboxed
+  text, the three password cases (none configured, a wrong one, the right one) with their
+  warnings, a typed password, and a volume's file read back. On your `sebastka-homelab`
+  bucket: 28 backups, last night's 8 volumes, the default-password warning, and the files of
+  `deluge/deluged-config-pvc`, in Chromium. This round ran on geras (no build; zeus was not
+  reachable over SSH from my shell).
 - **kopia (D20):** 7 more tests (39 in all, run on zeus): error classification, that repository
   details never carry keys or secrets, the object ID check, and against RustFS with a repository
   created by the real kopia CLI under a prefix: detection, write protection (UI and server),
@@ -357,7 +403,8 @@ Copied from MailWatch:
 - Background jobs with progress for very large folder operations (D7).
 - Copy and move across connections (D8).
 - Editing bucket policy, CORS and lifecycle (D14).
-- Downloading a folder or a selection as one zip (today: one download per file), for objects
-  and for kopia snapshots (D20).
+- Downloading a folder or a selection as one zip (today: one download per file), for objects,
+  kopia snapshots (D20) and Velero volumes (D21).
+- Comparing two Velero backups or kopia snapshots of a volume (what changed overnight).
 - Object Lock retention and legal hold editing (shown, not editable), restoring archived
   (Glacier) objects, SSE-C objects (they need the customer key on every request).

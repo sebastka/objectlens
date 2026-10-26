@@ -11,9 +11,24 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { HeadObjectCommand, type S3Client } from '@aws-sdk/client-s3';
-import type { KopiaBrowse, KopiaEntry, KopiaSnapshot, KopiaStatus, KopiaSummary } from '../shared/types.ts';
+import type {
+  KopiaBrowse,
+  KopiaEntry,
+  KopiaPasswordSource,
+  KopiaSnapshot,
+  KopiaStatus,
+  KopiaSummary,
+} from '../shared/types.ts';
 import type { ConnectionConfig } from './config.ts';
 import { describe } from './s3.ts';
+
+/** The password Velero gives its kopia repositories when none is configured (velero/pkg/repository). */
+export const VELERO_DEFAULT_PASSWORD = 'static-passw0rd';
+
+interface Candidate {
+  value: string;
+  source: KopiaPasswordSource;
+}
 
 export type KopiaErrorCode = 'not-installed' | 'locked' | 'bad-password' | 'not-found' | 'failed';
 
@@ -216,6 +231,10 @@ export class Kopia {
   private readonly streams = new Limit(MAX_STREAMS);
   /** Passwords typed in the UI, by repository; memory only. */
   private readonly typed = new Map<string, string>();
+  /** The configured password that opened each repository, and those it rejected. */
+  private readonly chosen = new Map<string, { candidate: Candidate; rejected: KopiaPasswordSource[] }>();
+  /** Repositories of Velero backup locations, as told by markVelero(). */
+  private readonly veleroRepos = new Set<string>();
   private readonly connected = new Map<string, Promise<void>>();
   private readonly dirs = new Lru<KopiaDirectory>(DIR_CACHE_ENTRIES);
   private readonly snapshotsCache = new Map<string, { at: number; list: Promise<KopiaSnapshot[]> }>();
@@ -240,10 +259,24 @@ export class Kopia {
     return { key, conn, bucket, prefix, dir: join(this.baseDir, id) };
   }
 
-  private password(r: Repo): { value: string; source: 'env' | 'ui' } | null {
-    const t = this.typed.get(r.key);
-    if (t !== undefined) return { value: t, source: 'ui' };
-    return r.conn.kopiaPassword ? { value: r.conn.kopiaPassword, source: 'env' } : null;
+  /** Declares whether a repository belongs to a Velero backup location (decides its passwords). */
+  markVelero(conn: ConnectionConfig, bucket: string, prefix: string, velero: boolean): void {
+    const { key } = this.repo(conn, bucket, prefix);
+    if (velero) this.veleroRepos.add(key);
+    else this.veleroRepos.delete(key);
+  }
+
+  /** The configured passwords to try, in order. */
+  private candidates(r: Repo): Candidate[] {
+    const c = r.conn;
+    if (this.veleroRepos.has(r.key)) {
+      return [
+        ...(c.veleroPassword ? [{ value: c.veleroPassword, source: 'velero-env' as const }] : []),
+        // Velero creates its repositories with this password unless told otherwise.
+        { value: VELERO_DEFAULT_PASSWORD, source: 'velero-default' as const },
+      ];
+    }
+    return c.kopiaPassword ? [{ value: c.kopiaPassword, source: 'env' }] : [];
   }
 
   /** Whether `prefix` of the bucket holds a kopia repository (its `kopia.repository` blob). */
@@ -402,28 +435,76 @@ export class Kopia {
     return p;
   }
 
-  /** The password and a connection, or KopiaError("locked"). */
+  /**
+   * The password and a connection: the typed password, else the first configured one that opens
+   * the repository. KopiaError("locked") when there is none, "bad-password" when none works.
+   */
   private async ready(r: Repo): Promise<string> {
-    const pw = this.password(r);
-    if (!pw) throw new KopiaError('locked', 'the repository password is needed');
-    await this.ensureConnected(r, pw.value);
-    return pw.value;
+    const typed = this.typed.get(r.key);
+    if (typed !== undefined) {
+      await this.ensureConnected(r, typed);
+      return typed;
+    }
+    const known = this.chosen.get(r.key);
+    if (known) {
+      await this.ensureConnected(r, known.candidate.value);
+      return known.candidate.value;
+    }
+    const candidates = this.candidates(r);
+    if (!candidates.length) throw new KopiaError('locked', 'the repository password is needed');
+    const rejected: KopiaPasswordSource[] = [];
+    for (const candidate of candidates) {
+      this.connected.delete(r.key);
+      try {
+        await this.ensureConnected(r, candidate.value);
+        this.chosen.set(r.key, { candidate, rejected });
+        return candidate.value;
+      } catch (e) {
+        if (!(e instanceof KopiaError && e.code === 'bad-password')) throw e;
+        rejected.push(candidate.source);
+      }
+    }
+    throw new KopiaError(
+      'bad-password',
+      candidates.length > 1 ? 'None of the configured passwords opens this repository.' : 'The password is wrong.',
+    );
+  }
+
+  /** Where the working password came from, and what the user should know about it. */
+  private passwordInfo(r: Repo): { source: KopiaPasswordSource | null; warning: string | null } {
+    if (this.typed.has(r.key)) return { source: 'ui', warning: null };
+    const known = this.chosen.get(r.key);
+    if (!known) return { source: null, warning: null };
+    const rejectedEnv = known.rejected.includes('velero-env')
+      ? ` S3_${r.conn.n}_VELERO_PASSWORD was tried first and does not open it.`
+      : '';
+    return {
+      source: known.candidate.source,
+      warning:
+        known.candidate.source === 'velero-default'
+          ? `Opened with Velero's built-in default password ("${VELERO_DEFAULT_PASSWORD}"): anyone who can read ` +
+            `this bucket can decrypt these backups. Give Velero a password of its own (secret ` +
+            `velero-repo-credentials) and change it on existing repositories.${rejectedEnv}`
+          : null,
+    };
   }
 
   async status(conn: ConnectionConfig, bucket: string, prefix: string): Promise<KopiaStatus> {
     const r = this.repo(conn, bucket, prefix);
     const version = await this.version();
-    const pw = this.password(r);
+    const velero = this.veleroRepos.has(r.key);
     const base: KopiaStatus = {
       installed: version !== null,
       kopiaVersion: version,
-      locked: pw === null,
-      passwordSource: pw?.source ?? null,
+      locked: true,
+      passwordSource: null,
+      warning: null,
+      velero,
       repository: null,
       error: null,
     };
     if (version === null) return { ...base, error: `kopia is not installed (KOPIA_BIN=${this.bin})` };
-    if (!pw) return base;
+    if (!this.typed.has(r.key) && !this.candidates(r).length) return base;
     try {
       let info = this.infoCache.get(r.key);
       if (!info) {
@@ -431,11 +512,12 @@ export class Kopia {
         info = repositoryInfo(JSON.parse(await this.exec(r, ['repository', 'status', '--json'], password)));
         this.infoCache.set(r.key, info);
       }
-      return { ...base, repository: info };
+      const { source, warning } = this.passwordInfo(r);
+      return { ...base, locked: false, passwordSource: source, warning, repository: info };
     } catch (e) {
       const k = e instanceof KopiaError ? e : new KopiaError('failed', (e as Error).message);
-      // A wrong password from the environment: let the user type the right one.
-      return { ...base, locked: k.code === 'bad-password', error: k.message };
+      // Configured passwords that do not work: let the user type the right one.
+      return { ...base, locked: k.code === 'bad-password' || k.code === 'locked', error: k.message };
     }
   }
 
@@ -452,6 +534,7 @@ export class Kopia {
       throw e;
     }
     this.typed.set(r.key, password);
+    this.chosen.delete(r.key);
     this.forgetCaches(r);
   }
 
@@ -459,6 +542,7 @@ export class Kopia {
   async lock(conn: ConnectionConfig, bucket: string, prefix: string): Promise<void> {
     const r = this.repo(conn, bucket, prefix);
     this.typed.delete(r.key);
+    this.chosen.delete(r.key);
     this.connected.delete(r.key);
     this.forgetCaches(r);
     await rm(r.dir, { recursive: true, force: true });
