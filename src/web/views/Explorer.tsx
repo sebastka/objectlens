@@ -48,6 +48,8 @@ export function Explorer({
   onNavigate,
   onOpenObject,
   onBucketDeleted,
+  onKopia,
+  onVelero,
 }: {
   conn: ConnectionInfo;
   bucket: string;
@@ -62,6 +64,10 @@ export function Explorer({
   onNavigate: (prefix: string) => void;
   onOpenObject: (key: string | null, versionId?: string | null) => void;
   onBucketDeleted: () => void;
+  /** Opens the kopia repository of this folder. */
+  onKopia: () => void;
+  /** Opens the Velero backup location of this folder. */
+  onVelero: () => void;
 }) {
   const toast = useToast();
   const [version, setVersion] = useState(0);
@@ -97,6 +103,10 @@ export function Explorer({
   };
 
   const caps = useAsync(() => api.capabilities(conn.id, bucket, prefix), [conn.id, bucket, prefix, version]);
+  const kopiaRepo = useAsync(() => api.kopiaDetect(conn.id, bucket, prefix), [conn.id, bucket, prefix]);
+  const isKopia = kopiaRepo.data?.repository === true;
+  const veleroLocation = useAsync(() => api.veleroDetect(conn.id, bucket, prefix), [conn.id, bucket, prefix]);
+  const isVelero = veleroLocation.data?.location === true;
   const c: Capabilities | null = caps.data;
   const versioning = useAsync(() => api.versioning(conn.id, bucket), [conn.id, bucket, version]);
 
@@ -475,8 +485,37 @@ export function Explorer({
         }}
       />
 
-      {caps.data && caps.data.list.allowed !== false && caps.data.write.allowed === false && !conn.readOnly && (
-        <InfoBanner>Read-only here: {caps.data.write.reason}</InfoBanner>
+      {isVelero && (
+        <div className="banner banner-kopia">
+          <Icon name="server" />
+          <div className="grow">
+            <b>This folder is a Velero backup location.</b> See its backups, what they hold, and browse the files of
+            backed-up volumes. Velero's folders are read-only here.
+          </div>
+          <button type="button" className="btn btn-primary" onClick={onVelero}>
+            <Icon name="history" />
+            Velero backups
+          </button>
+        </div>
+      )}
+      {isKopia ? (
+        <div className="banner banner-kopia">
+          <Icon name="archive" />
+          <div className="grow">
+            <b>This folder is a kopia backup repository.</b> Browse its snapshots and restore files; its objects
+            themselves are read-only here, since changing them would corrupt the backups.
+          </div>
+          <button type="button" className="btn btn-primary" onClick={onKopia}>
+            <Icon name="history" />
+            Browse backups
+          </button>
+        </div>
+      ) : (
+        !isVelero &&
+        caps.data &&
+        caps.data.list.allowed !== false &&
+        caps.data.write.allowed === false &&
+        !conn.readOnly && <InfoBanner>Read-only here: {caps.data.write.reason}</InfoBanner>
       )}
       {conn.readOnly && (
         <InfoBanner>This connection is configured read-only (READ_ONLY): nothing can be changed.</InfoBanner>

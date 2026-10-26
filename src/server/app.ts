@@ -42,6 +42,8 @@ import { CapabilityTracker } from './capabilities.ts';
 import type { Config, ConnectionConfig } from './config.ts';
 import { bucketDetails, inlineType, objectDetails } from './details.ts';
 import { hostGuard, sameOriginGuard } from './guard.ts';
+import { Kopia, KopiaError } from './kopia.ts';
+import { Velero } from './velero.ts';
 import { deleteIds, expand, folderSize, itemFolder, search, toEntry, transfer } from './ops.ts';
 import { copyObject, createClient, describe, unquote } from './s3.ts';
 
@@ -105,12 +107,33 @@ export function contentDisposition(type: 'inline' | 'attachment', name: string):
   return `${type}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)}`;
 }
 
+/**
+ * Headers of a file download. Inline only for types the preview shows, and never as active
+ * content: the response is sandboxed (no scripts, no same-origin access) and its type is fixed,
+ * so an uploaded HTML or SVG file cannot run code in ObjectLens' origin.
+ */
+export function fileHeaders(name: string, inline: { kind: string; type: string } | null): Headers {
+  const headers = new Headers({
+    'content-type': inline?.type ?? 'application/octet-stream',
+    'content-disposition': contentDisposition(inline ? 'inline' : 'attachment', name || 'download'),
+    'x-content-type-options': 'nosniff',
+    'cache-control': 'private, no-store',
+  });
+  // Chrome's PDF viewer does not run in a sandboxed document.
+  if (inline?.kind !== 'pdf') {
+    headers.set('content-security-policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+  }
+  return headers;
+}
+
 /** Leaves user-supplied header values out when empty. */
 const opt = <K extends string>(k: K, v: string | null | undefined) => (v ? ({ [k]: v } as Record<K, string>) : {});
 
 export function createApp(cfg: Config): Hono<Env> {
   const app = new Hono<Env>();
   const caps = new CapabilityTracker(cfg.limits.capabilityTtlMinutes);
+  const kopia = new Kopia(cfg.kopia);
+  const velero = new Velero();
   const clients = new Map<string, S3Client>();
   const presigners = new Map<string, S3Client>();
   const client = (c: ConnectionConfig) => {
@@ -127,6 +150,11 @@ export function createApp(cfg: Config): Hono<Env> {
 
   app.onError((err, c) => {
     if (err instanceof HttpError) return c.json({ error: err.message }, err.status);
+    if (err instanceof KopiaError) {
+      const status = { 'not-installed': 501, locked: 423, 'bad-password': 400, 'not-found': 404, failed: 502 } as const;
+      if (err.code === 'failed') console.error(`[${c.req.method} ${c.req.path}] kopia: ${err.message}`);
+      return c.json({ error: err.message, code: `kopia-${err.code}` }, status[err.code]);
+    }
     const f = describe(err);
     if (f.status >= 500 || f.code === 'Error') console.error(`[${c.req.method} ${c.req.path}]`, err);
     const status = f.denied ? 403 : f.status === 404 ? 404 : f.status >= 400 && f.status < 500 ? 400 : 502;
@@ -153,7 +181,11 @@ export function createApp(cfg: Config): Hono<Env> {
       formAction: ["'none'"],
     },
   });
-  app.use('*', (c, next) => (c.req.path.endsWith('/download') ? downloadHeaders(c, next) : pageHeaders(c, next)));
+  app.use('*', (c, next) =>
+    /\/(download|kopia\/file|velero\/(manifest|logs))$/.test(c.req.path)
+      ? downloadHeaders(c, next)
+      : pageHeaders(c, next),
+  );
   app.use('/api/*', sameOriginGuard());
 
   app.get('/api/health', (c) => c.json({ ok: true }));
@@ -189,6 +221,28 @@ export function createApp(cfg: Config): Hono<Env> {
   };
   const track = <T>(c: Context<Env>, prefix: string, cap: CapKey, fn: () => Promise<T>) =>
     caps.track(c.get('conn').id, c.req.param('bucket') ?? '', prefix, cap, fn);
+  /** Why a folder's objects must not be changed: a kopia repository or Velero's backup folders. */
+  const protectedReason = async (c: Context<Env>, folder: string): Promise<string | null> => {
+    const [s3, id, bucket] = [c.get('s3'), c.get('conn').id, c.req.param('bucket') ?? ''];
+    if (await kopia.isRepository(s3, id, bucket, folder)) {
+      return 'This folder holds a kopia repository: changing its objects would corrupt the backups.';
+    }
+    if (await velero.isManaged(s3, id, bucket, folder).catch(() => false)) {
+      return 'This folder belongs to a Velero backup location: Velero keeps its backups here (delete them with velero).';
+    }
+    return null;
+  };
+  /**
+   * Refuses changes inside a kopia repository (a deleted, renamed or overwritten blob corrupts
+   * the backups) and in a Velero location's backups/ folders. Deleting the whole folder from its
+   * parent is left possible, for repositories that are really no longer wanted.
+   */
+  const notInKopia = async (c: Context<Env>, folders: string[]) => {
+    for (const f of new Set(folders)) {
+      const why = await protectedReason(c, f);
+      if (why) throw new HttpError(403, `"${f || '/'}": ${why}`);
+    }
+  };
   const audit = (c: Context<Env>, what: string) =>
     console.log(`[write] ${c.get('conn').id}/${c.req.param('bucket') ?? ''}: ${what}`);
 
@@ -265,9 +319,19 @@ export function createApp(cfg: Config): Hono<Env> {
     c.json(await bucketDetails(c.get('s3'), c.req.param('bucket'))),
   );
 
-  app.get('/api/c/:conn/b/:bucket/capabilities', async (c) =>
-    c.json(await caps.get(c.get('conn'), c.get('s3'), c.req.param('bucket'), c.req.query('prefix') ?? '')),
-  );
+  app.get('/api/c/:conn/b/:bucket/capabilities', async (c) => {
+    const prefix = c.req.query('prefix') ?? '';
+    const bucket = c.req.param('bucket');
+    const [result, why] = await Promise.all([
+      caps.get(c.get('conn'), c.get('s3'), bucket, prefix),
+      protectedReason(c, prefix).catch(() => null),
+    ]);
+    if (why) {
+      const no = { allowed: false, reason: why };
+      return c.json({ ...result, write: no, delete: no, tags: no });
+    }
+    return c.json(result);
+  });
 
   /** "Enabled", "Suspended", null (never enabled) — or unknown when it may not be read. */
   app.get('/api/c/:conn/b/:bucket/versioning', async (c) => {
@@ -434,22 +498,11 @@ export function createApp(cfg: Config): Hono<Env> {
         { abortSignal: c.req.raw.signal },
       ),
     );
-    // Inline only for types the preview shows, and never as active content: the response is
-    // sandboxed (no scripts, no same-origin access) and its type is fixed, so an uploaded HTML or
-    // SVG file cannot run code in ObjectLens' origin.
-    const inline = c.req.query('inline') === '1' ? inlineType(key, r.ContentType ?? null) : null;
-    const kind = inline?.kind ?? null;
-    const type = inline?.type ?? 'application/octet-stream';
-    const headers = new Headers({
-      'content-type': type,
-      'content-disposition': contentDisposition(kind ? 'inline' : 'attachment', baseName(key) || 'download'),
-      'x-content-type-options': 'nosniff',
-      'cache-control': 'private, no-store',
-      'accept-ranges': 'bytes',
-    });
-    // Chrome's PDF viewer does not run in a sandboxed document.
-    if (kind !== 'pdf')
-      headers.set('content-security-policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+    const headers = fileHeaders(
+      baseName(key),
+      c.req.query('inline') === '1' ? inlineType(key, r.ContentType ?? null) : null,
+    );
+    headers.set('accept-ranges', 'bytes');
     if (r.ContentLength !== undefined) headers.set('content-length', String(r.ContentLength));
     if (r.ContentRange) headers.set('content-range', r.ContentRange);
     if (r.ETag) headers.set('etag', r.ETag);
@@ -463,6 +516,7 @@ export function createApp(cfg: Config): Hono<Env> {
     const key = str(c.req.query('key'), 'key');
     const err = keyError(key);
     if (err) throw bad(err);
+    await notInKopia(c, [parentPrefix(key)]);
     const Bucket = c.req.param('bucket');
     const s3 = c.get('s3');
     if (c.req.query('overwrite') !== '1') {
@@ -547,6 +601,7 @@ export function createApp(cfg: Config): Hono<Env> {
     const key = `${parent}${name}/`;
     const kerr = keyError(key);
     if (kerr) throw bad(kerr);
+    await notInKopia(c, [parent]);
     await track(c, parent, 'write', () =>
       c.get('s3').send(new PutObjectCommand({ Bucket: c.req.param('bucket'), Key: key, Body: '' })),
     );
@@ -560,6 +615,7 @@ export function createApp(cfg: Config): Hono<Env> {
     // {prefix: ""} empties the whole bucket.
     const list = items(b.items, true);
     const allVersions = b.allVersions === true;
+    await notInKopia(c, list.map(itemFolder));
     const s3 = c.get('s3');
     const Bucket = c.req.param('bucket');
     // Listing what to delete is not deleting: only the deletes teach the capability.
@@ -601,6 +657,8 @@ export function createApp(cfg: Config): Hono<Env> {
         }
       }
     }
+    // A copy out of a repository is fine; a move would delete its blobs.
+    await notInKopia(c, [...pairs.map((p) => parentPrefix(p.to)), ...(move ? list.map(itemFolder) : [])]);
     let resume: Resume | null = null;
     if (isObject(b.resume)) {
       const { pair, after } = b.resume;
@@ -625,6 +683,7 @@ export function createApp(cfg: Config): Hono<Env> {
     writable(c);
     const b = (await body(c)) as unknown as EditMetadataRequest;
     const key = str(b.key, 'key');
+    await notInKopia(c, [parentPrefix(key)]);
     if (!isObject(b.system) || !isObject(b.metadata)) throw bad('system and metadata are required');
     const metadata: Record<string, string> = {};
     for (const [k, v] of Object.entries(b.metadata)) {
@@ -666,6 +725,7 @@ export function createApp(cfg: Config): Hono<Env> {
     writable(c);
     const b = await body(c);
     const key = str(b.key, 'key');
+    await notInKopia(c, [parentPrefix(key)]);
     const t = tags(b.tags);
     if (t.length > 10) throw bad('S3 allows at most 10 tags per object');
     await track(c, parentPrefix(key), 'tags', () =>
@@ -687,6 +747,7 @@ export function createApp(cfg: Config): Hono<Env> {
     writable(c);
     const b = await body(c);
     const key = str(b.key, 'key');
+    await notInKopia(c, [parentPrefix(key)]);
     const versionId = str(b.versionId, 'versionId');
     const Bucket = c.req.param('bucket');
     const r = await track(c, parentPrefix(key), 'write', () =>
@@ -717,6 +778,130 @@ export function createApp(cfg: Config): Hono<Env> {
       { expiresIn: seconds },
     );
     return c.json<ShareLink>({ url, expiresAt: new Date(Date.now() + seconds * 1000).toISOString() });
+  });
+
+  // --- kopia repositories (read-only) ---------------------------------------------------
+  // `prefix` is the folder holding the repository's kopia.repository blob.
+
+  const kopiaRepo = async (c: Context<Env>, prefix: string) => {
+    if (prefix && !prefix.endsWith('/')) throw bad('prefix must be empty or end with "/"');
+    const [s3, conn, bucket] = [c.get('s3'), c.get('conn'), c.req.param('bucket') ?? ''];
+    if (!(await kopia.isRepository(s3, conn.id, bucket, prefix))) {
+      throw new HttpError(404, 'no kopia repository in this folder');
+    }
+    // Velero's repositories have their own password (S3_n_VELERO_PASSWORD, else Velero's default).
+    kopia.markVelero(
+      conn,
+      bucket,
+      prefix,
+      await velero.isVeleroRepository(s3, conn.id, bucket, prefix).catch(() => false),
+    );
+    return [conn, bucket, prefix] as const;
+  };
+
+  /** Whether the folder holds a kopia repository (one HEAD request; never runs kopia). */
+  app.get('/api/c/:conn/b/:bucket/kopia/detect', async (c) => {
+    const prefix = c.req.query('prefix') ?? '';
+    const repository = await kopia
+      .isRepository(c.get('s3'), c.get('conn').id, c.req.param('bucket'), prefix)
+      .catch(() => false);
+    return c.json({ repository });
+  });
+
+  app.get('/api/c/:conn/b/:bucket/kopia/status', async (c) =>
+    c.json(await kopia.status(...(await kopiaRepo(c, c.req.query('prefix') ?? '')))),
+  );
+
+  app.post('/api/c/:conn/b/:bucket/kopia/unlock', async (c) => {
+    const b = await body(c);
+    const password = str(b.password, 'password');
+    if (!password) throw bad('the password is empty');
+    await kopia.unlock(...(await kopiaRepo(c, str(b.prefix ?? '', 'prefix'))), password);
+    return c.json({ ok: true });
+  });
+
+  app.post('/api/c/:conn/b/:bucket/kopia/lock', async (c) => {
+    const b = await body(c);
+    await kopia.lock(...(await kopiaRepo(c, str(b.prefix ?? '', 'prefix'))));
+    return c.json({ ok: true });
+  });
+
+  app.get('/api/c/:conn/b/:bucket/kopia/snapshots', async (c) =>
+    c.json(await kopia.snapshots(...(await kopiaRepo(c, c.req.query('prefix') ?? '')), c.req.query('fresh') === '1')),
+  );
+
+  app.get('/api/c/:conn/b/:bucket/kopia/browse', async (c) =>
+    c.json(
+      await kopia.browse(
+        ...(await kopiaRepo(c, c.req.query('prefix') ?? '')),
+        str(c.req.query('snapshot'), 'snapshot'),
+        c.req.query('path') ?? '',
+      ),
+    ),
+  );
+
+  app.get('/api/c/:conn/b/:bucket/kopia/file', async (c) => {
+    const path = str(c.req.query('path'), 'path');
+    const { entry, stream } = await kopia.open(
+      ...(await kopiaRepo(c, c.req.query('prefix') ?? '')),
+      str(c.req.query('snapshot'), 'snapshot'),
+      path,
+      c.req.raw.signal,
+    );
+    // Content types are not stored in a snapshot: chosen from the name, as for previews.
+    const headers = fileHeaders(entry.name, c.req.query('inline') === '1' ? inlineType(entry.name, null) : null);
+    if (entry.size !== null) headers.set('content-length', String(entry.size));
+    if (entry.mtime) headers.set('last-modified', new Date(entry.mtime).toUTCString());
+    return new Response(Readable.toWeb(stream) as ReadableStream, { headers });
+  });
+
+  // --- Velero backup locations (read-only) -----------------------------------------------
+  // `prefix` is the location's folder (holding backups/ and kopia/).
+
+  const veleroLocation = async (c: Context<Env>, prefix: string) => {
+    if (prefix && !prefix.endsWith('/')) throw bad('prefix must be empty or end with "/"');
+    const [s3, id, bucket] = [c.get('s3'), c.get('conn').id, c.req.param('bucket') ?? ''];
+    if (!(await velero.isLocation(s3, id, bucket, prefix))) throw new HttpError(404, 'no Velero backup location here');
+    return { s3, id, bucket, prefix };
+  };
+
+  /** Whether the folder is a Velero backup location (two requests; cached). */
+  app.get('/api/c/:conn/b/:bucket/velero/detect', async (c) => {
+    const location = await velero
+      .isLocation(c.get('s3'), c.get('conn').id, c.req.param('bucket'), c.req.query('prefix') ?? '')
+      .catch(() => false);
+    return c.json({ location });
+  });
+
+  app.get('/api/c/:conn/b/:bucket/velero/backups', async (c) => {
+    const l = await veleroLocation(c, c.req.query('prefix') ?? '');
+    return c.json(await velero.backups(l.s3, l.id, l.bucket, l.prefix, c.req.query('fresh') === '1'));
+  });
+
+  app.get('/api/c/:conn/b/:bucket/velero/backup', async (c) => {
+    const l = await veleroLocation(c, c.req.query('prefix') ?? '');
+    const d = await velero.backup(l.s3, l.bucket, l.prefix, str(c.req.query('name'), 'name'));
+    return d ? c.json(d) : c.json({ error: 'no such backup' }, 404);
+  });
+
+  /** Text views (a manifest of the tarball, the log): sandboxed plain text, as previews are. */
+  const textResponse = (name: string, text: string) => {
+    const headers = fileHeaders(name, { kind: 'text', type: 'text/plain; charset=utf-8' });
+    return new Response(text, { headers });
+  };
+
+  app.get('/api/c/:conn/b/:bucket/velero/manifest', async (c) => {
+    const l = await veleroLocation(c, c.req.query('prefix') ?? '');
+    const path = str(c.req.query('path'), 'path');
+    const text = await velero.manifest(l.s3, l.bucket, l.prefix, str(c.req.query('name'), 'name'), path);
+    return text === null ? c.json({ error: 'no such manifest' }, 404) : textResponse(baseName(path), text);
+  });
+
+  app.get('/api/c/:conn/b/:bucket/velero/logs', async (c) => {
+    const l = await veleroLocation(c, c.req.query('prefix') ?? '');
+    const name = str(c.req.query('name'), 'name');
+    const text = await velero.logs(l.s3, l.bucket, l.prefix, name);
+    return text === null ? c.json({ error: 'no log for this backup' }, 404) : textResponse(`${name}.log`, text);
   });
 
   app.all('/api/*', (c) => c.json({ error: 'not found' }, 404));

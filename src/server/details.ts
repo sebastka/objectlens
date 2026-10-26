@@ -66,60 +66,8 @@ export function formatAcl(owner: Owner | undefined, grants: S3Grant[] | undefine
   };
 }
 
-const TEXT_TYPES = /^(text\/|application\/(json|xml|yaml|x-yaml|javascript|x-sh|toml|x-toml|sql|graphql|ld\+json))/;
-const TEXT_EXT =
-  /\.(txt|md|markdown|csv|tsv|json|jsonl|ndjson|ya?ml|toml|ini|cfg|conf|env|xml|html?|css|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sh|bash|zsh|sql|log|properties|tf|hcl|gitignore|dockerfile|svg)$/i;
-/** Image types browsers display; also the only images served inline. */
-export const INLINE_IMAGE = /^image\/(png|jpeg|gif|webp|avif|bmp|svg\+xml|x-icon|vnd\.microsoft\.icon)$/;
-
-export function previewKind(key: string, contentType: string | null, size: number, textMax: number) {
-  const t = (contentType ?? '').split(';')[0]!.trim().toLowerCase();
-  if (INLINE_IMAGE.test(t)) return 'image';
-  if (t.startsWith('audio/')) return 'audio';
-  if (t.startsWith('video/')) return 'video';
-  if (t === 'application/pdf') return 'pdf';
-  if ((TEXT_TYPES.test(t) || TEXT_EXT.test(key)) && size <= textMax) return 'text';
-  // Uploaded without a proper type: fall back to the extension for media too.
-  if (t === '' || t === 'application/octet-stream' || t === 'binary/octet-stream') {
-    if (/\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(key)) return 'image';
-    if (/\.pdf$/i.test(key)) return 'pdf';
-  }
-  return null;
-}
-
-const IMAGE_EXT: Record<string, string> = {
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  avif: 'image/avif',
-  bmp: 'image/bmp',
-};
-
-/**
- * The type an inline preview is served with: chosen by ObjectLens, never taken unchecked from
- * the object (it could say text/html). null = not shown inline (served as an attachment).
- */
-export function inlineType(key: string, contentType: string | null): { kind: string; type: string } | null {
-  const kind = previewKind(key, contentType, Infinity, Infinity);
-  const t = (contentType ?? '').split(';')[0]!.trim().toLowerCase();
-  switch (kind) {
-    case 'text':
-      return { kind, type: 'text/plain; charset=utf-8' };
-    case 'pdf':
-      return { kind, type: 'application/pdf' };
-    case 'image': {
-      const type = INLINE_IMAGE.test(t) ? t : IMAGE_EXT[key.slice(key.lastIndexOf('.') + 1).toLowerCase()];
-      return type ? { kind, type } : null;
-    }
-    case 'audio':
-    case 'video':
-      return { kind, type: t };
-    default:
-      return null;
-  }
-}
+export { INLINE_IMAGE, inlineType, previewKind } from '../shared/preview.ts';
+import { previewKind } from '../shared/preview.ts';
 
 const iso = (d: Date | undefined) => (d ? d.toISOString() : null);
 

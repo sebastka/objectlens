@@ -6,6 +6,9 @@ import type {
   Capabilities,
   EditMetadataRequest,
   ItemRef,
+  KopiaBrowse,
+  KopiaSnapshot,
+  KopiaStatus,
   ListResponse,
   ObjectDetails,
   Resume,
@@ -14,6 +17,8 @@ import type {
   SizeResponse,
   Tag,
   UploadResult,
+  VeleroBackup,
+  VeleroBackupDetails,
   VersionEntry,
 } from '../shared/types.ts';
 
@@ -177,4 +182,41 @@ export const api = {
     request<{ versionId: string | null }>(`${bucketPath(c, b)}/restore-version`, send('POST', { key, versionId })),
   share: (c: string, b: string, key: string, hours: number, versionId?: string | null) =>
     request<ShareLink>(`${bucketPath(c, b)}/share`, send('POST', { key, hours, versionId })),
+
+  // kopia repositories (read-only); `prefix` is the repository's folder.
+  kopiaDetect: (c: string, b: string, prefix: string) =>
+    request<{ repository: boolean }>(`${bucketPath(c, b)}/kopia/detect${query({ prefix })}`),
+  kopiaStatus: (c: string, b: string, prefix: string) =>
+    request<KopiaStatus>(`${bucketPath(c, b)}/kopia/status${query({ prefix })}`),
+  kopiaUnlock: (c: string, b: string, prefix: string, password: string) =>
+    request<{ ok: true }>(`${bucketPath(c, b)}/kopia/unlock`, send('POST', { prefix, password })),
+  kopiaLock: (c: string, b: string, prefix: string) =>
+    request<{ ok: true }>(`${bucketPath(c, b)}/kopia/lock`, send('POST', { prefix })),
+  kopiaSnapshots: (c: string, b: string, prefix: string, fresh = false) =>
+    request<KopiaSnapshot[]>(`${bucketPath(c, b)}/kopia/snapshots${query({ prefix, fresh: fresh ? 1 : undefined })}`),
+  kopiaBrowse: (c: string, b: string, prefix: string, snapshot: string, path: string) =>
+    request<KopiaBrowse>(`${bucketPath(c, b)}/kopia/browse${query({ prefix, snapshot, path })}`),
+  veleroDetect: (c: string, b: string, prefix: string) =>
+    request<{ location: boolean }>(`${bucketPath(c, b)}/velero/detect${query({ prefix })}`),
+  veleroBackups: (c: string, b: string, prefix: string, fresh = false) =>
+    request<VeleroBackup[]>(`${bucketPath(c, b)}/velero/backups${query({ prefix, fresh: fresh ? 1 : undefined })}`),
+  veleroBackup: (c: string, b: string, prefix: string, name: string) =>
+    request<VeleroBackupDetails>(`${bucketPath(c, b)}/velero/backup${query({ prefix, name })}`),
+  veleroText: async (c: string, b: string, prefix: string, name: string, what: 'logs' | { manifest: string }) => {
+    const url =
+      what === 'logs'
+        ? `${bucketPath(c, b)}/velero/logs${query({ prefix, name })}`
+        : `${bucketPath(c, b)}/velero/manifest${query({ prefix, name, path: what.manifest })}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`, null, null);
+    return res.text();
+  },
+  kopiaText: async (c: string, b: string, prefix: string, snapshot: string, path: string) => {
+    const res = await fetch(kopiaFileUrl(c, b, prefix, snapshot, path, true));
+    if (!res.ok) throw new ApiError(res.status, `${res.status} ${res.statusText}`, null, null);
+    return res.text();
+  },
 };
+
+export const kopiaFileUrl = (c: string, b: string, prefix: string, snapshot: string, path: string, inline = false) =>
+  `${bucketPath(c, b)}/kopia/file${query({ prefix, snapshot, path, inline: inline ? 1 : undefined })}`;

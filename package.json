@@ -22,13 +22,14 @@
     "test": "node --env-file-if-exists=.env --test \"test/**/*.test.ts\"",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
     "bundle": "bash scripts/bundle.sh",
-    "docker:build": "docker build -t objectlens:local ."
+    "docker:build": "docker build -t objectlens:local .",
+    "kopia:bin": "docker buildx build --target kopia-bin --output type=local,dest=build/kopia ."
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1149.0",
-    "@aws-sdk/lib-storage": "^3.1149.0",
-    "@aws-sdk/s3-request-presigner": "^3.1149.0",
-    "@hono/node-server": "^2.1.4",
+    "@aws-sdk/client-s3": "^3.1152.0",
+    "@aws-sdk/lib-storage": "^3.1152.0",
+    "@aws-sdk/s3-request-presigner": "^3.1152.0",
+    "@hono/node-server": "^2.1.5",
     "@smithy/node-http-handler": "^4.12.1",
     "hono": "^4.13.13",
     "openid-client": "^6.8.8"
@@ -47,10 +48,10 @@
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.13.0",
     "prettier": "^3.9.10",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-eslint": "^8.71.1",
+    "typescript-eslint": "^8.71.2",
     "vite": "^8.3.4"
   }
 }

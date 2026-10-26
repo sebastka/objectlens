@@ -992,6 +992,12 @@ textarea.editor {
   margin-top: 2px;
   color: var(--accent);
 }
+.banner-warn {
+  border-left-color: var(--warning);
+}
+.banner-warn .icon {
+  color: var(--warning-ink);
+}
 .banner-error {
   border-left-color: var(--critical);
 }
@@ -1127,6 +1133,12 @@ textarea.editor {
 .tag-warn {
   color: var(--warning-ink);
 }
+.tag-ok {
+  color: var(--good-ink);
+}
+.tag-error {
+  color: var(--critical-ink);
+}
 .mono {
   font-family: var(--mono);
   font-size: 12.5px;
@@ -1183,4 +1195,106 @@ textarea.editor {
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* --- kopia backups --------------------------------------------------------------------- */
+
+.banner-kopia {
+  border-left-color: var(--folder);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.banner-kopia .icon {
+  color: var(--folder);
+  margin-top: 0;
+}
+details.collapsible {
+  margin-bottom: 12px;
+}
+details.collapsible summary {
+  cursor: pointer;
+}
+details.collapsible[open] summary {
+  margin-bottom: 8px;
+}
+.snapshot-group {
+  margin-bottom: 14px;
+}
+.snapshot-group h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+.snapshot-group .tag {
+  margin: 0 4px 2px 0;
+}
+.snapshot-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.snapshot-head .tag {
+  margin-left: 0;
+}
+.unlock {
+  max-width: 560px;
+  display: grid;
+  gap: 10px;
+}
+.unlock h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  margin: 0;
+}
+.unlock input {
+  flex: 1;
+  min-width: 200px;
+}
+.files .col-mode {
+  white-space: nowrap;
+  width: 110px;
+}
+.files .col-owner {
+  white-space: nowrap;
+  width: 90px;
+}
+@media (max-width: 700px) {
+  .files .col-mode,
+  .files .col-owner {
+    display: none;
+  }
+}
+
+/* --- Velero ------------------------------------------------------------------------------ */
+
+.velero-summary {
+  margin-bottom: 14px;
+}
+.velero-summary .kv {
+  margin-top: 4px;
+}
+.volume-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+.manifest-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  columns: 2 320px;
+}
+.manifest-list li {
+  break-inside: avoid;
+}
+pre.log {
+  max-height: none;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

@@ -1,6 +1,8 @@
 // Configuration from the environment. Everything is validated at startup: a mistake stops the
 // server with a list of every problem rather than surfacing later as a confusing S3 error.
-import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 type Env = Record<string, string | undefined>;
 
@@ -29,6 +31,10 @@ export interface ConnectionConfig {
   shareLinks: boolean;
   /** Endpoint written into presigned URLs, when browsers reach S3 under another name. */
   publicEndpoint: string | null;
+  /** Password of the kopia repositories reached through this connection (KOPIA_PASSWORD[_FILE]). */
+  kopiaPassword: string | null;
+  /** Password of the kopia repositories of Velero backup locations (VELERO_PASSWORD[_FILE]). */
+  veleroPassword: string | null;
 }
 
 export interface Config {
@@ -50,6 +56,12 @@ export interface Config {
     capabilityTtlMinutes: number;
   };
   staticDir: string;
+  kopia: {
+    /** The kopia binary (KOPIA_BIN, default "kopia" on the PATH). */
+    bin: string;
+    /** Per-repository kopia configuration, cache and logs (KOPIA_DIR). */
+    dir: string;
+  };
 }
 
 function str(env: Env, name: string, fallback?: string): string | undefined {
@@ -75,6 +87,26 @@ function bool(env: Env, name: string, fallback: boolean, errors: string[]): bool
   if (['0', 'false', 'no', 'off'].includes(v)) return false;
   errors.push(`${name} must be true or false, got "${v}"`);
   return fallback;
+}
+
+/** A secret from NAME, or from the file NAME_FILE points to (Docker/Kubernetes secrets). */
+function secret(env: Env, name: string, errors: string[]): string | null {
+  const direct = env[name];
+  const file = str(env, `${name}_FILE`);
+  if (direct && file) {
+    errors.push(`${name} and ${name}_FILE exclude each other`);
+    return null;
+  }
+  if (file) {
+    try {
+      // Only a trailing newline is dropped: a password may start or end with spaces.
+      return readFileSync(file, 'utf8').replace(/\r?\n$/, '') || null;
+    } catch (e) {
+      errors.push(`${name}_FILE: cannot read ${file} (${(e as Error).message})`);
+      return null;
+    }
+  }
+  return direct ? direct : null;
 }
 
 function list(env: Env, name: string): string[] {
@@ -150,6 +182,8 @@ function connection(env: Env, n: number, errors: string[], ids: Set<string>): Co
     probe: bool(env, `${p}PROBE`, true, errors),
     shareLinks: bool(env, `${p}SHARE_LINKS`, true, errors),
     publicEndpoint: url(env, `${p}PUBLIC_ENDPOINT`, errors),
+    kopiaPassword: secret(env, `${p}KOPIA_PASSWORD`, errors),
+    veleroPassword: secret(env, `${p}VELERO_PASSWORD`, errors),
   };
 }
 
@@ -173,6 +207,12 @@ export function loadConfig(env: Env = process.env): Config {
       capabilityTtlMinutes: int(env, 'CAPABILITY_TTL_MINUTES', 10, errors, 0),
     },
     staticDir: resolve(str(env, 'STATIC_DIR', resolve(import.meta.dirname, '../../dist/web'))!),
+    kopia: {
+      bin: str(env, 'KOPIA_BIN', 'kopia')!,
+      dir: resolve(
+        str(env, 'KOPIA_DIR', join(str(env, 'XDG_CACHE_HOME', join(homedir(), '.cache'))!, 'objectlens', 'kopia'))!,
+      ),
+    },
   };
   if (errors.length) throw new ConfigError(errors);
   return cfg;

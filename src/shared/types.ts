@@ -201,3 +201,146 @@ export interface EditMetadataRequest {
   metadata: Record<string, string>;
   storageClass?: string;
 }
+
+// --- kopia repositories (read-only) ---------------------------------------------------------
+
+/**
+ * Where the password that opened a repository came from: typed in the UI, S3_n_KOPIA_PASSWORD,
+ * S3_n_VELERO_PASSWORD, or Velero's built-in default.
+ */
+export type KopiaPasswordSource = 'ui' | 'env' | 'velero-env' | 'velero-default';
+
+export interface KopiaStatus {
+  /** The kopia binary could be run. */
+  installed: boolean;
+  kopiaVersion: string | null;
+  /** No password known yet: the UI asks for one. */
+  locked: boolean;
+  /** Where the password came from: the connection's KOPIA_PASSWORD, or typed in the UI. */
+  passwordSource: KopiaPasswordSource | null;
+  /** Something the user should know, e.g. that Velero's well-known default password opened it. */
+  warning: string | null;
+  /** The repository belongs to a Velero backup location (one repository per namespace). */
+  velero: boolean;
+  /** Format and storage settings, only once unlocked (never keys or secrets). */
+  repository: { label: string; value: string }[] | null;
+  /** Why the repository could not be opened. */
+  error: string | null;
+}
+
+export interface KopiaSummary {
+  size: number;
+  files: number;
+  dirs: number;
+  symlinks: number;
+  /** Entries kopia could not read when it took the snapshot. */
+  failed: number;
+  /** Latest modification time below this folder. */
+  maxTime: string | null;
+}
+
+export interface KopiaSnapshot {
+  id: string;
+  source: { host: string; user: string; path: string };
+  description: string;
+  startTime: string;
+  endTime: string | null;
+  /** null = complete; otherwise kopia's reason, e.g. "checkpoint" or "canceled". */
+  incomplete: string | null;
+  /** Retention reasons ("latest-1", "daily-3", "incomplete", …). */
+  retention: string[];
+  pins: string[];
+  rootType: string;
+  summary: KopiaSummary | null;
+  errors: number;
+}
+
+export interface KopiaEntry {
+  name: string;
+  /** "f" file, "d" directory, "s" symlink, other kopia types as reported. */
+  type: string;
+  size: number | null;
+  mtime: string | null;
+  /** Unix permission bits as an octal string ("0644"). */
+  mode: string | null;
+  uid: number | null;
+  gid: number | null;
+  /** kopia object ID (content-addressed). */
+  oid: string;
+  /** Folders: what is below them. */
+  summary: KopiaSummary | null;
+}
+
+export interface KopiaBrowse {
+  snapshot: KopiaSnapshot;
+  /** Path inside the snapshot, "" for its root. */
+  path: string;
+  entries: KopiaEntry[];
+  summary: KopiaSummary | null;
+}
+
+// --- Velero backup locations (read-only) ---------------------------------------------------
+
+export interface VeleroBackup {
+  name: string;
+  /** The schedule that created it (label velero.io/schedule-name). */
+  schedule: string | null;
+  phase: string;
+  startTime: string | null;
+  completionTime: string | null;
+  expiration: string | null;
+  storageLocation: string | null;
+  includedNamespaces: string[];
+  excludedNamespaces: string[];
+  includedResources: string[];
+  excludedResources: string[];
+  labelSelector: string | null;
+  snapshotMoveData: boolean;
+  defaultVolumesToFsBackup: boolean;
+  ttl: string | null;
+  itemsBackedUp: number | null;
+  totalItems: number | null;
+  errors: number;
+  warnings: number;
+  failureReason: string | null;
+  formatVersion: string | null;
+  /** Kubernetes version of the backed-up cluster. */
+  clusterVersion: string | null;
+  /** Asynchronous item operations (data mover uploads, …). */
+  operations: { attempted: number; completed: number; failed: number };
+}
+
+export interface VeleroVolume {
+  namespace: string;
+  /** PVC name (data mover, CSI) or the pod's volume name (file-system backup). */
+  pvc: string | null;
+  pod: string | null;
+  volume: string | null;
+  method: 'data-mover' | 'fs-backup' | 'csi-snapshot' | 'native-snapshot';
+  uploader: string | null;
+  /** kopia snapshot ID in `repository` (data mover and file-system backups). */
+  snapshotId: string | null;
+  /** Folder of the kopia repository holding the data, when it is browsable here. */
+  repository: string | null;
+  phase: string | null;
+  bytes: number | null;
+  incrementalBytes: number | null;
+  startTime: string | null;
+  completionTime: string | null;
+  node: string | null;
+  /** For CSI and native snapshots: the snapshot stays in the cluster or cloud, not in this bucket. */
+  note: string | null;
+}
+
+export interface VeleroBackupDetails {
+  backup: VeleroBackup;
+  /** Backed-up resources by type ("v1/PersistentVolumeClaim" → ["ns/name", …]). */
+  resources: Record<string, string[]>;
+  /** Errors and warnings by scope (velero, cluster, namespaces). */
+  results: { errors: unknown; warnings: unknown } | null;
+  volumes: VeleroVolume[];
+  /** Files of the backup's tarball, for viewing the stored manifests. */
+  manifests: string[];
+  /** Objects of the backup folder (name → size). */
+  files: { name: string; size: number }[];
+}

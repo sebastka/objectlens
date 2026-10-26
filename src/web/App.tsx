@@ -11,6 +11,8 @@ import { dateTime } from './format.ts';
 import { useAsync } from './hooks.ts';
 import logo from './logo.svg';
 import { Explorer } from './views/Explorer.tsx';
+import { KopiaView } from './views/KopiaView.tsx';
+import { VeleroView } from './views/VeleroView.tsx';
 
 /** Where we are: kept in the query string so that reload, back and links work. */
 interface Location {
@@ -19,16 +21,32 @@ interface Location {
   p: string;
   o: string;
   v: string;
+  /** "1": the kopia repository in folder p, read-only. */
+  k: string;
+  /** kopia snapshot ID. */
+  s: string;
+  /** Folder inside the snapshot ("a/b"). */
+  kp: string;
+  /** File of that folder shown in the drawer. */
+  kf: string;
+  /** "1": the Velero backup location in folder p. */
+  vel: string;
+  /** Velero backup name. */
+  vb: string;
+  /** Shown in the drawer: "logs" or a manifest path of the backup. */
+  vf: string;
 }
+
+const KEYS = ['c', 'b', 'p', 'o', 'v', 'k', 's', 'kp', 'kf', 'vel', 'vb', 'vf'] as const;
 
 const readLocation = (): Location => {
   const q = new URLSearchParams(location.search);
-  return { c: q.get('c') ?? '', b: q.get('b') ?? '', p: q.get('p') ?? '', o: q.get('o') ?? '', v: q.get('v') ?? '' };
+  return Object.fromEntries(KEYS.map((k) => [k, q.get(k) ?? ''])) as unknown as Location;
 };
 
 const href = (l: Partial<Location>) => {
   const q = new URLSearchParams();
-  for (const k of ['c', 'b', 'p', 'o', 'v'] as const) if (l[k]) q.set(k, l[k]!);
+  for (const k of KEYS) if (l[k]) q.set(k, l[k]!);
   const s = q.toString();
   return s ? `/?${s}` : '/';
 };
@@ -84,7 +102,7 @@ function Shell() {
   }, []);
 
   const go = useCallback((l: Partial<Location>, replace = false) => {
-    const next = { c: '', b: '', p: '', o: '', v: '', ...l };
+    const next = { ...(Object.fromEntries(KEYS.map((k) => [k, ''])) as unknown as Location), ...l };
     if (replace) history.replaceState(null, '', href(next));
     else history.pushState(null, '', href(next));
     setLoc(next);
@@ -220,7 +238,35 @@ function Shell() {
               }}
             />
           )}
-          {conn && loc.b && info.data && (
+          {conn && loc.b && info.data && loc.vel === '1' && (
+            <VeleroView
+              key={`${conn.id}/${loc.b}/${loc.p}`}
+              conn={conn}
+              bucket={loc.b}
+              prefix={loc.p}
+              backup={loc.vb || null}
+              file={loc.vf || null}
+              onGo={(l, replace) => go({ c: conn.id, b: loc.b, p: loc.p, vel: '1', ...l }, replace)}
+              onObjects={() => go({ c: conn.id, b: loc.b, p: loc.p })}
+              onBrowse={(repository, snapshot) => go({ c: conn.id, b: loc.b, p: repository, k: '1', s: snapshot })}
+            />
+          )}
+          {conn && loc.b && info.data && loc.k === '1' && (
+            <KopiaView
+              key={`${conn.id}/${loc.b}/${loc.p}`}
+              conn={conn}
+              bucket={loc.b}
+              prefix={loc.p}
+              snapshot={loc.s || null}
+              path={loc.kp}
+              file={loc.kf || null}
+              textBytes={info.data.limits.textBytes}
+              onGo={(l, replace) => go({ c: conn.id, b: loc.b, p: loc.p, k: '1', ...l }, replace)}
+              onObjects={() => go({ c: conn.id, b: loc.b, p: loc.p })}
+              onVelero={(location) => go({ c: conn.id, b: loc.b, p: location, vel: '1' })}
+            />
+          )}
+          {conn && loc.b && info.data && loc.k !== '1' && loc.vel !== '1' && (
             <Explorer
               key={`${conn.id}/${loc.b}`}
               conn={conn}
@@ -233,6 +279,8 @@ function Shell() {
               uploads={uploads}
               uploadedVersion={uploaded.at === `${conn.id}/${loc.b}` ? uploaded.n : 0}
               onNavigate={(p) => go({ c: conn.id, b: loc.b, p })}
+              onKopia={() => go({ c: conn.id, b: loc.b, p: loc.p, k: '1' })}
+              onVelero={() => go({ c: conn.id, b: loc.b, p: loc.p, vel: '1' })}
               onOpenObject={(o, v) => go({ c: conn.id, b: loc.b, p: loc.p, o: o ?? '', v: v ?? '' }, !o)}
               onBucketDeleted={() => {
                 setBucketsVersion((v) => v + 1);

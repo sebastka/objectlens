@@ -26,6 +26,13 @@ Cloudflare R2, …) that runs on your own machine and opens in the browser.
   "what may I do" call, so ObjectLens finds out with side-effect-free probes and learns from
   denied requests (see [DECISIONS.md](DECISIONS.md#d4-greying-out-what-the-credentials-may-not-do)).
 - **Share links**: presigned download URLs, valid up to 7 days.
+- **kopia backups** (read-only): a folder holding a [kopia](https://kopia.io) repository shows
+  its snapshots, including the checkpoints of uploads still running; browse them, see file
+  permissions and owners, preview and download files. The repository's own objects are
+  protected from changes (see [kopia backups](#kopia-backups)).
+- **Velero backups** (read-only): a [Velero](https://velero.io) backup location shows its
+  backups, what each holds (resources, manifests, errors, log), and its volumes; **Browse files**
+  opens a volume's data as of that backup (see [Velero backups](#velero-backups)).
 
 Credentials stay on the server side of ObjectLens; the browser only talks to ObjectLens.
 
@@ -71,6 +78,8 @@ Connections are numbered blocks, `S3_<n>_*`:
 | `S3_n_SHARE_LINKS`, `S3_n_PUBLIC_ENDPOINT`     | Presigned links (default on), and the host name to put in them                     |
 | `S3_n_FORCE_PATH_STYLE`                        | Path-style URLs (default on with an endpoint, off for AWS)                         |
 | `S3_n_TLS_REJECT_UNAUTHORIZED`                 | `false` accepts self-signed certificates (prefer `NODE_EXTRA_CA_CERTS`)            |
+| `S3_n_KOPIA_PASSWORD` / `…_FILE`               | Password of the kopia repositories on this connection (else typed in the UI)       |
+| `S3_n_VELERO_PASSWORD` / `…_FILE`              | Password of Velero's kopia repositories (else Velero's default, then the UI)       |
 
 Several connections to the same endpoint with different credentials are fine: each is shown
 with its own permissions.
@@ -92,6 +101,44 @@ with its own permissions.
 - **Deleting in a versioned bucket** adds delete markers; the data stays as older versions. The
   delete dialog can remove every version too.
 
+## kopia backups
+
+ObjectLens recognises a folder (or bucket) holding a kopia repository by its `kopia.repository`
+object and offers **Browse backups**. Reading goes through the kopia CLI, which must be
+installed where ObjectLens runs (the container image includes it; locally e.g.
+`nix shell nixpkgs#kopia`, or `KOPIA_BIN=/path/to/kopia`):
+
+- the connection is **read-only** (`kopia repository connect --readonly`): nothing is ever written
+  to the repository;
+- the **password** comes from `S3_n_KOPIA_PASSWORD` (or `S3_n_KOPIA_PASSWORD_FILE`), or is typed
+  in the UI and kept in memory only, until a restart or **Lock**; it is never written to disk;
+- kopia keeps a configuration (which holds the connection's S3 keys) and a cache of up to
+  ~750 MB per repository in `KOPIA_DIR` (default `~/.cache/objectlens/kopia`, private to the
+  user); **Lock** removes them;
+- the repository's own objects cannot be uploaded, deleted, renamed or edited through ObjectLens:
+  a changed blob corrupts the backups. Deleting the whole folder from its parent stays possible.
+
+Listing snapshots and opening a folder take about a second the first time (one kopia process
+each); folders are then cached, since kopia's object IDs are content hashes. Files are streamed
+from `kopia show`: previews of large videos cannot seek.
+
+## Velero backups
+
+A folder (or bucket) with Velero's layout (`backups/<name>/velero-backup.json`) is a backup
+location: ObjectLens offers **Velero backups** there.
+
+- **Backups**: status, schedule, start, duration, expiry, items, errors and warnings, scope.
+- **A backup**: its settings, errors and warnings, log, the backed-up resources and their stored
+  manifests, and its **volumes**: data mover and file-system backups (kopia) can be browsed and
+  downloaded file by file; CSI and provider snapshots stay in the cluster and are only listed.
+  The volumes come from Velero's `volumeinfo`, or, where it is empty (data mover backups of
+  Velero 1.18), from the DataUploads stored in the backup's tarball.
+- **Volume data** lives in one kopia repository per namespace (`kopia/<namespace>/`), opened
+  read-only as above. Its password: `S3_n_VELERO_PASSWORD`, else Velero's built-in default
+  (`static-passw0rd`, with a warning: anyone who can read the bucket can then decrypt the
+  backups), else typed in the UI.
+- Velero's folders are read-only in ObjectLens; restoring is Velero's job.
+
 ## Security
 
 - No login (by design, see above); `LISTEN_HOST` defaults to `127.0.0.1`, and a warning is
@@ -106,6 +153,9 @@ with its own permissions.
   HTML included, is served as `text/plain`. An uploaded HTML or SVG file cannot run script in
   ObjectLens' origin.
 - Every change is logged to stdout (`[write] connection/bucket: …`).
+- **kopia** runs with only the variables it needs (its password and the connection's keys), never
+  with ObjectLens' whole environment, and object IDs are checked before they reach its command
+  line.
 
 ## Development
 
@@ -124,7 +174,9 @@ and 3 to see the permission handling. Docker publishes the port on `CONTAINER_HO
 (default `127.0.0.1`).
 
 The integration tests run against that server when `TEST_S3_ENDPOINT` is set
-(`http://127.0.0.1:9400`); they create and remove buckets of their own.
+(`http://127.0.0.1:9400`); they create and remove buckets of their own. The kopia tests also need
+a kopia binary: `npm run kopia:bin` exports the one pinned in the Dockerfile to
+`build/kopia/kopia` (or set `TEST_KOPIA_BIN`).
 
 Stack: Hono API and React 19 / Vite UI, Node 26 running the TypeScript server directly (type
 stripping), the AWS SDK v3. No database.
