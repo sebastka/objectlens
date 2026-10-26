@@ -4,6 +4,8 @@
 # with a Docker Hub account):
 #   build      dev image (npm, root): installs all dependencies and builds the UI
 #   prod-deps  dev image: production dependencies only
+#   kopia      the official kopia image, only for its static binary (read-only kopia browsing)
+#   kopia-bin  just that binary: `npm run kopia:bin` exports it for the tests (CI and local)
 #   runtime    hardened image (non-root uid 1000, no shell, no package manager)
 #
 # Both build stages run on the builder's native platform (--platform=$BUILDPLATFORM): their
@@ -11,7 +13,10 @@
 # amd64 images are produced without emulation. Typecheck, lint and tests run in CI, not here.
 #
 #   docker build -t objectlens .        (or: npm run docker:build)
-#   docker run --rm -p 127.0.0.1:3000:3000 --env-file .env objectlens
+#   docker run --rm -p 127.0.0.1:3000:3000 --env-file .env --read-only --tmpfs /tmp objectlens
+#
+# kopia needs a writable directory for its configuration and cache (KOPIA_DIR, /tmp here): with
+# a read-only root filesystem, give it a tmpfs or a volume.
 #
 # ObjectLens has no login: publish the port on 127.0.0.1 only (see README).
 # Images are pinned by digest (multi-arch index); Dependabot keeps them up to date.
@@ -29,6 +34,13 @@ WORKDIR /src
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 
+# kopia is a static Go binary: it runs on the Alpine runtime as is. Its version is pinned here
+# only; Dependabot keeps it current.
+FROM kopia/kopia:0.23.1@sha256:89fd95ee2942880ca00eae964266958a394421ddbdf69bca62e38afc55f5900e AS kopia
+
+FROM scratch AS kopia-bin
+COPY --from=kopia /usr/bin/kopia /kopia
+
 FROM dhi.io/node:26-alpine@sha256:5c86dab3a84b76e8ae134d04adf87bd23c5356a4d24f2005f57aa0aa305d7773 AS runtime
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="objectlens" \
@@ -40,6 +52,8 @@ LABEL org.opencontainers.image.title="objectlens" \
 # 0.0.0.0 inside the container; the host decides who can reach it (-p 127.0.0.1:3000:3000).
 ENV NODE_ENV=production \
     LISTEN_HOST=0.0.0.0 \
+    KOPIA_BIN=/usr/local/bin/kopia \
+    KOPIA_DIR=/tmp/objectlens-kopia \
     PORT=3000
 
 # Same /app layout as the release archive (scripts/bundle.sh). Everything is owned by root
@@ -50,6 +64,7 @@ COPY --from=prod-deps /src/node_modules ./node_modules
 COPY --from=build /src/dist ./dist
 COPY src/server ./src/server
 COPY src/shared ./src/shared
+COPY --from=kopia /usr/bin/kopia /usr/local/bin/kopia
 
 EXPOSE 3000
 

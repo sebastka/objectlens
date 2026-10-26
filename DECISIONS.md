@@ -263,8 +263,64 @@ Copied from MailWatch:
   disabled. The default `GITHUB_TOKEN` permission stays **read-only**; both workflows declare
   the permissions they need.
 
-### D20. What I verified, and what not ⚠️
+### D20. kopia backups, through the kopia CLI ⚠️
 
+- **Read-only browsing** of kopia repositories stored in a bucket: snapshots (including the
+  checkpoints of an upload still running), folders with permissions and owners, file
+  properties, previews and downloads. Nothing is ever written to the repository.
+- **The CLI, not a reimplementation:** you preferred the CLI, and it is the lower-risk choice:
+  kopia's own code reads every format version, compression and encryption it supports. Reading
+  the format natively in TypeScript would have meant re-implementing its key derivation,
+  per-content encryption, binary index format and object layout (1,500–2,500 lines), with
+  subtle mismatches as the risk. The cost of the CLI is a 52 MB binary in the image and a
+  process per request (about a second); folder listings are cached for good, since object IDs
+  are content hashes, and the snapshot list for 30 s.
+- **Commands used:** `repository connect s3 --readonly --no-persist-credentials` once per
+  repository and process, then `snapshot list --all --incomplete --json`, `show <object-id>` (a
+  folder's listing as JSON, or a file's content as a stream) and `repository status --json` (of
+  which only format details are passed on, never keys or secrets). At most 4 kopia commands and
+  8 file streams run at a time.
+- **Password:** `S3_n_KOPIA_PASSWORD` (or `…_FILE`) applies to every repository reached through
+  connection n; otherwise it is typed in the UI and kept in memory only. It reaches kopia only
+  through its environment, never the command line or a file. A wrong password from the
+  configuration shows the unlock form with the error.
+- **On disk:** kopia's configuration holds the connection's S3 keys (kopia cannot work
+  otherwise), plus a cache capped at 256 MB of contents and 512 MB of metadata, in
+  `KOPIA_DIR/<hash>/` (folder 700, files 600). **Lock** deletes it. In the container `KOPIA_DIR`
+  is `/tmp/objectlens-kopia`: give it a tmpfs or a volume with `--read-only`.
+- **kopia's environment** holds only what it needs: `PATH`, its password, the connection's
+  keys (or the AWS default-chain variables), and `HOME`/`TMPDIR` pointing into its own folder.
+  ObjectLens' environment, with every connection's keys, is not passed on.
+- **Addressing:** the UI names folders by path inside a snapshot; the server walks from the
+  snapshot's root and checks that each name exists. A file can only be read if it is listed in
+  such a folder, so a guessed object ID cannot read anything else, and IDs are checked against
+  kopia's format before reaching its command line.
+- **Protection:** a folder holding `kopia.repository` refuses uploads, deletes, renames and
+  metadata or tag edits inside it, on the server and greyed out in the UI, since one changed
+  blob corrupts the backups. Deleting the whole folder from its parent stays possible, for
+  repositories no longer wanted (Object Lock, as on your Hetzner bucket, still applies).
+- **The snapshot list** shows, by default, the complete snapshots and the newest incomplete
+  one of each source: a long upload leaves a checkpoint every 45 minutes (12 for `Documents`
+  on its first day). A toggle shows them all.
+- **The binary** comes from the official `kopia/kopia` image, pinned by digest in the
+  Dockerfile (its only place, updated by Dependabot); it is static, so it runs on the hardened
+  Alpine runtime. CI exports the same binary for the tests (`npm run kopia:bin`). Locally,
+  kopia must be on the PATH or `KOPIA_BIN` must point to it.
+- **Not done:** downloading or restoring a folder as an archive, seeking in large video previews
+  (files are streamed from `kopia show`, without ranges), comparing snapshots, single-file
+  snapshots (shown, not browsable), and kopia's repository server protocol.
+
+### D21. What I verified, and what not ⚠️
+
+- **kopia (D20):** 7 more tests (39 in all, run on zeus): error classification, that repository
+  details never carry keys or secrets, the object ID check, and against RustFS with a repository
+  created by the real kopia CLI under a prefix: detection, write protection (UI and server),
+  locked → wrong password → unlock → lock, the password from the configuration, snapshots,
+  nested folders, a binary file byte for byte, a Unicode name, HTML served as sandboxed text,
+  and 404s for folders, links and made-up paths. Against your Hetzner repository (380+ GiB, a
+  backup still running): 18 snapshots of 6 sources, browsing, a text preview and download, in
+  Chromium. The image with kopia built on zeus; kopia runs in the hardened runtime with a
+  read-only root filesystem.
 - **Verified:** `npm run check` (typecheck, ESLint, Prettier, 32 tests, 15 of them against
   RustFS, including copies and deletes over a tiny `BULK_LIMIT`: uploads, ranges, conflicts, preview headers, metadata/tags, versions and restore,
   folder copy/rename/move across buckets, deletes with and without versions, share links,
@@ -292,8 +348,7 @@ Copied from MailWatch:
     version listing;
   - deleting all versions of one key scanned every key starting with its name.
 - **Not verified:** AWS S3 itself (no credentials here; in particular the write probe's
-  assumption, D4), other S3-compatible servers (Ceph, Garage, R2, MinIO), the release and image
-  jobs (not run yet, see D18), files over 5 GiB (the multipart
+  assumption, D4), other S3-compatible servers (Ceph, Garage, R2, MinIO), files over 5 GiB (the multipart
   copy path), and the ACL carry-over (RustFS accepts `PutObjectAcl` but keeps no grants).
 
 ## Ideas not implemented
@@ -302,6 +357,7 @@ Copied from MailWatch:
 - Background jobs with progress for very large folder operations (D7).
 - Copy and move across connections (D8).
 - Editing bucket policy, CORS and lifecycle (D14).
-- Downloading a folder or a selection as one zip (today: one download per file).
+- Downloading a folder or a selection as one zip (today: one download per file), for objects
+  and for kopia snapshots (D20).
 - Object Lock retention and legal hold editing (shown, not editable), restoring archived
   (Glacier) objects, SSE-C objects (they need the customer key on every request).
