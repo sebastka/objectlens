@@ -201,3 +201,70 @@ export interface EditMetadataRequest {
   metadata: Record<string, string>;
   storageClass?: string;
 }
+
+// --- kopia repositories (read-only) ---------------------------------------------------------
+
+export interface KopiaStatus {
+  /** The kopia binary could be run. */
+  installed: boolean;
+  kopiaVersion: string | null;
+  /** No password known yet: the UI asks for one. */
+  locked: boolean;
+  /** Where the password came from: the connection's KOPIA_PASSWORD, or typed in the UI. */
+  passwordSource: 'env' | 'ui' | null;
+  /** Format and storage settings, only once unlocked (never keys or secrets). */
+  repository: { label: string; value: string }[] | null;
+  /** Why the repository could not be opened. */
+  error: string | null;
+}
+
+export interface KopiaSummary {
+  size: number;
+  files: number;
+  dirs: number;
+  symlinks: number;
+  /** Entries kopia could not read when it took the snapshot. */
+  failed: number;
+  /** Latest modification time below this folder. */
+  maxTime: string | null;
+}
+
+export interface KopiaSnapshot {
+  id: string;
+  source: { host: string; user: string; path: string };
+  description: string;
+  startTime: string;
+  endTime: string | null;
+  /** null = complete; otherwise kopia's reason, e.g. "checkpoint" or "canceled". */
+  incomplete: string | null;
+  /** Retention reasons ("latest-1", "daily-3", "incomplete", …). */
+  retention: string[];
+  pins: string[];
+  rootType: string;
+  summary: KopiaSummary | null;
+  errors: number;
+}
+
+export interface KopiaEntry {
+  name: string;
+  /** "f" file, "d" directory, "s" symlink, other kopia types as reported. */
+  type: string;
+  size: number | null;
+  mtime: string | null;
+  /** Unix permission bits as an octal string ("0644"). */
+  mode: string | null;
+  uid: number | null;
+  gid: number | null;
+  /** kopia object ID (content-addressed). */
+  oid: string;
+  /** Folders: what is below them. */
+  summary: KopiaSummary | null;
+}
+
+export interface KopiaBrowse {
+  snapshot: KopiaSnapshot;
+  /** Path inside the snapshot, "" for its root. */
+  path: string;
+  entries: KopiaEntry[];
+  summary: KopiaSummary | null;
+}

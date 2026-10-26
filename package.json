@@ -22,7 +22,8 @@
     "test": "node --env-file-if-exists=.env --test \"test/**/*.test.ts\"",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
     "bundle": "bash scripts/bundle.sh",
-    "docker:build": "docker build -t objectlens:local ."
+    "docker:build": "docker build -t objectlens:local .",
+    "kopia:bin": "docker buildx build --target kopia-bin --output type=local,dest=build/kopia ."
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1152.0",

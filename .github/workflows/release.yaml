@@ -43,6 +43,11 @@ jobs:
       - name: Start S3 (RustFS) with demo users
         run: npm run dev:s3
 
+      # The kopia binary of the Dockerfile's pinned image, for the kopia integration tests
+      # (build/kopia/kopia, picked up by test/kopia.test.ts).
+      - name: Export kopia
+        run: npm run kopia:bin
+
       - name: Check
         run: npm run check
 
