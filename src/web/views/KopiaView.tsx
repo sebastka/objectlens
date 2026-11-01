@@ -179,6 +179,7 @@ export function KopiaView({
       {st?.installed && !st.locked && !st.error && (
         <>
           {!snapshot && <RepositoryInfo status={st} />}
+          {!snapshot && <Maintenance conn={conn} bucket={bucket} prefix={prefix} />}
           {snapshot ? (
             <Browser
               conn={conn}
@@ -296,6 +297,181 @@ function RepositoryInfo({ status }: { status: KopiaStatus }) {
         </span>
       </summary>
       <KV rows={(status.repository ?? []).map((r): [string, string] => [r.label, r.value])} />
+    </details>
+  );
+}
+
+/** kopia's maintenance tasks (repo/maintenance/maintenance_run.go), in words. */
+const MAINTENANCE_TASKS: Record<string, string> = {
+  'snapshot-gc': 'Snapshot garbage collection',
+  'quick-delete-blobs': 'Delete unused blobs (quick)',
+  'full-delete-blobs': 'Delete unused blobs',
+  'quick-rewrite-contents': 'Rewrite contents (quick)',
+  'full-rewrite-contents': 'Rewrite contents',
+  'full-drop-deleted-content': 'Drop deleted contents',
+  'index-compaction': 'Index compaction',
+  'extend-blob-retention-time': 'Extend object locks',
+  'cleanup-logs': 'Clean up logs',
+  'advance-epoch': 'Advance index epoch',
+  'delete-superseded-epoch-indexes': 'Delete superseded indexes',
+  'cleanup-epoch-markers': 'Clean up epoch markers',
+  'generate-epoch-range-index': 'Generate range index',
+  'compact-single-epoch': 'Compact index epoch',
+};
+
+/** "every 24 h", "every 30 min". */
+function every(seconds: number | null): string {
+  if (!seconds) return '';
+  if (seconds % 3600 === 0) return `every ${seconds / 3600} h`;
+  return `every ${Math.round(seconds / 60)} min`;
+}
+
+/** Maintenance failures never show in snapshots: they are only in the repository's maintenance history. */
+function Maintenance({ conn, bucket, prefix }: { conn: ConnectionInfo; bucket: string; prefix: string }) {
+  const [fresh, setFresh] = useState(0);
+  const m = useAsync(() => api.kopiaMaintenance(conn.id, bucket, prefix, fresh > 0), [conn.id, bucket, prefix, fresh]);
+  const info = m.data;
+  // Tasks whose latest run failed: the state now. Older failures: the recent history.
+  const failing = info?.tasks.filter((t) => !t.runs[0]!.success) ?? [];
+  const failures = (info?.tasks ?? [])
+    .flatMap((t) => t.runs.filter((r) => !r.success).map((r) => ({ task: t.task, ...r })))
+    .sort((a, b) => Date.parse(b.start) - Date.parse(a.start)); // kopia's times carry local offsets
+  const lastFull = info?.tasks.find((t) => t.task === 'snapshot-gc' || t.task === 'full-delete-blobs')?.runs[0];
+  const label = (task: string) => MAINTENANCE_TASKS[task] ?? task;
+
+  return (
+    <details className="card collapsible" open={failing.length > 0 || undefined}>
+      <summary>
+        <b>Maintenance</b> {!info && !m.error && <span className="muted small">loading…</span>}
+        {m.error && <span className="tag tag-error">Unavailable</span>}
+        {info &&
+          (failing.length ? (
+            <span className="tag tag-error" title={failing.map((t) => label(t.task)).join(', ')}>
+              {plural(failing.length, 'task')} failed
+            </span>
+          ) : info.tasks.length ? (
+            <span className="tag tag-ok">OK</span>
+          ) : (
+            <span className="tag">Never run</span>
+          ))}{' '}
+        {info && (
+          <span className="muted small">
+            {lastFull ? `last full run ${ago(lastFull.start)}` : 'no full run yet'}
+            {!failing.length && failures.length ? ` · ${plural(failures.length, 'earlier failure')}` : ''}
+          </span>
+        )}
+      </summary>
+      {m.error && <ErrorBanner>{m.error.message}</ErrorBanner>}
+      {info && (
+        <>
+          <KV
+            rows={[
+              ['Owner', <span className="mono">{info.owner || '–'}</span>],
+              [
+                'Quick cycle',
+                info.quick.enabled
+                  ? `${every(info.quick.intervalSeconds)}${info.nextQuick ? `, next ${dateTime(info.nextQuick)}` : ''}`
+                  : 'disabled',
+              ],
+              [
+                'Full cycle',
+                info.full.enabled
+                  ? `${every(info.full.intervalSeconds)}${info.nextFull ? `, next ${dateTime(info.nextFull)}` : ''}`
+                  : 'disabled',
+              ],
+              ['Object lock renewal', info.extendObjectLocks ? 'enabled (at each full cycle)' : 'disabled'],
+            ]}
+          />
+          {info.tasks.length > 0 && (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Task</th>
+                    <th>Last run</th>
+                    <th>Duration</th>
+                    <th>Status</th>
+                    <th className="num">Recent runs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {info.tasks.map((t) => {
+                    const last = t.runs[0]!;
+                    const failed = t.runs.filter((r) => !r.success).length;
+                    return (
+                      <tr key={t.task}>
+                        <td title={t.task}>{label(t.task)}</td>
+                        <td>
+                          {dateTime(last.start)}
+                          <div className="muted small">{ago(last.start)}</div>
+                        </td>
+                        <td>{duration(last.start, last.end)}</td>
+                        <td>
+                          {last.success ? (
+                            <span className="tag tag-ok">Succeeded</span>
+                          ) : (
+                            <span className="tag tag-error" title={last.error ?? undefined}>
+                              Failed
+                            </span>
+                          )}
+                        </td>
+                        <td className="num" title="kopia keeps the last 50 runs of each task">
+                          {failed ? `${failed} of ${t.runs.length} failed` : `${t.runs.length} succeeded`}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {failures.length > 0 && (
+            <>
+              <h3>Failures</h3>
+              <div className="table-wrap">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Started</th>
+                      <th>Task</th>
+                      <th>Error</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {failures.slice(0, 20).map((f) => (
+                      <tr key={`${f.task}-${f.start}`}>
+                        <td>
+                          {dateTime(f.start)}
+                          <div className="muted small">{ago(f.start)}</div>
+                        </td>
+                        <td>{label(f.task)}</td>
+                        <td className="mono small">{f.error}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {failures.length > 20 && (
+                <div className="muted small">
+                  {(failures.length - 20).toLocaleString('en')} older failures not shown.
+                </div>
+              )}
+            </>
+          )}
+          <div className="toolbar">
+            <span className="muted small">From the repository's maintenance history (`kopia maintenance info`).</span>
+            <button
+              type="button"
+              className="btn btn-icon"
+              aria-label="Refresh"
+              title="Refresh"
+              onClick={() => setFresh((f) => f + 1)}
+            >
+              <Icon name="refresh" />
+            </button>
+          </div>
+        </>
+      )}
     </details>
   );
 }

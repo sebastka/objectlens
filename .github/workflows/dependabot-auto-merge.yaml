@@ -19,15 +19,15 @@ jobs:
         id: meta
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0
 
-      # Auto-merge non-major bumps (minor + patch, and base image digest refreshes) for GitHub
-      # Actions, npm and the Dockerfile.
+      # Auto-merge non-major bumps (minor + patch, and image digest refreshes) for GitHub
+      # Actions, npm, the Dockerfile and compose.yaml (the dev/CI S3 server).
       # The merge still waits on the required "Check (tsc + eslint + prettier + tests) & build" status check, so
       # nothing lands unless `npm run check` passes. NB: fetch-metadata reports npm
       # as "npm_and_yarn" (Dependabot's internal name), not "npm".
       - name: Approve and enable auto-merge
         if: >-
           steps.meta.outputs.update-type != 'version-update:semver-major'
-          && contains(fromJSON('["github_actions", "npm_and_yarn", "docker"]'), steps.meta.outputs.package-ecosystem)
+          && contains(fromJSON('["github_actions", "npm_and_yarn", "docker", "docker_compose"]'), steps.meta.outputs.package-ecosystem)
         run: |
           gh pr review --approve "$PR_URL"
           gh pr merge --auto --squash "$PR_URL"

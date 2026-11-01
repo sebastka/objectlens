@@ -255,6 +255,36 @@ export interface KopiaSnapshot {
   errors: number;
 }
 
+/** One run of a maintenance task. */
+export interface KopiaMaintenanceRun {
+  start: string;
+  end: string | null;
+  success: boolean;
+  /** kopia's error, when it failed. */
+  error: string | null;
+}
+
+/** A maintenance task and its recent runs, newest first (kopia keeps 50 per task). */
+export interface KopiaMaintenanceTask {
+  /** kopia's task type, e.g. "snapshot-gc" or "extend-blob-retention-time". */
+  task: string;
+  runs: KopiaMaintenanceRun[];
+}
+
+/** Maintenance settings and history (`kopia maintenance info`): failures there never show in snapshots. */
+export interface KopiaMaintenance {
+  /** user@host allowed to run maintenance. */
+  owner: string;
+  quick: { enabled: boolean; intervalSeconds: number | null };
+  full: { enabled: boolean; intervalSeconds: number | null };
+  /** Full maintenance renews the object locks of the blobs in use. */
+  extendObjectLocks: boolean;
+  nextQuick: string | null;
+  nextFull: string | null;
+  /** Tasks with runs, most recently run first. */
+  tasks: KopiaMaintenanceTask[];
+}
+
 export interface KopiaEntry {
   name: string;
   /** "f" file, "d" directory, "s" symlink, other kopia types as reported. */

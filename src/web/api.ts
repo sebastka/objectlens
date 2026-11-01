@@ -7,6 +7,7 @@ import type {
   EditMetadataRequest,
   ItemRef,
   KopiaBrowse,
+  KopiaMaintenance,
   KopiaSnapshot,
   KopiaStatus,
   ListResponse,
@@ -194,6 +195,10 @@ export const api = {
     request<{ ok: true }>(`${bucketPath(c, b)}/kopia/lock`, send('POST', { prefix })),
   kopiaSnapshots: (c: string, b: string, prefix: string, fresh = false) =>
     request<KopiaSnapshot[]>(`${bucketPath(c, b)}/kopia/snapshots${query({ prefix, fresh: fresh ? 1 : undefined })}`),
+  kopiaMaintenance: (c: string, b: string, prefix: string, fresh = false) =>
+    request<KopiaMaintenance>(
+      `${bucketPath(c, b)}/kopia/maintenance${query({ prefix, fresh: fresh ? 1 : undefined })}`,
+    ),
   kopiaBrowse: (c: string, b: string, prefix: string, snapshot: string, path: string) =>
     request<KopiaBrowse>(`${bucketPath(c, b)}/kopia/browse${query({ prefix, snapshot, path })}`),
   veleroDetect: (c: string, b: string, prefix: string) =>
