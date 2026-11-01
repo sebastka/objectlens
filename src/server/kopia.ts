@@ -207,6 +207,25 @@ interface RawCycle {
   interval?: number;
 }
 
+/** Tasks that only full maintenance runs: their latest run is the latest full cycle. */
+const FULL_TASKS = new Set([
+  'snapshot-gc',
+  'full-delete-blobs',
+  'full-rewrite-contents',
+  'full-drop-deleted-content',
+  'extend-blob-retention-time',
+]);
+
+const DAY_MS = 86_400_000;
+
+/** The Object Lock of a repository, from `repository status --json`. */
+export function objectLockOf(st: Record<string, unknown>): { mode: string; days: number } | null {
+  const br = st.blobRetention as { retentionMode?: unknown; retentionPeriod?: unknown } | undefined;
+  if (!br || typeof br.retentionMode !== 'string' || !br.retentionMode) return null;
+  const period = typeof br.retentionPeriod === 'number' ? br.retentionPeriod : 0;
+  return { mode: br.retentionMode, days: Math.round(period / NS_PER_DAY) };
+}
+
 interface RawMaintenanceInfo {
   owner?: string;
   quick?: RawCycle;
@@ -215,7 +234,10 @@ interface RawMaintenanceInfo {
   schedule?: {
     nextFullMaintenance?: string;
     nextQuickMaintenance?: string;
-    runs?: Record<string, { start?: string; end?: string; success?: boolean; error?: string }[] | null>;
+    runs?: Record<
+      string,
+      { start?: string; end?: string; success?: boolean; error?: string; extra?: unknown }[] | null
+    >;
   };
 }
 
@@ -228,7 +250,13 @@ const cycle = (c: RawCycle | undefined) => ({
 });
 
 /** The parts of `kopia maintenance info --json` worth showing (no log retention, no parallelism). */
-export function toMaintenance(m: RawMaintenanceInfo): KopiaMaintenance {
+export function toMaintenance(
+  m: RawMaintenanceInfo,
+  objectLock: { mode: string; days: number } | null = null,
+  now = Date.now(),
+): KopiaMaintenance {
+  // A run without a start time sorts as the oldest (Date.parse('') is NaN).
+  const time = (s: string | null) => (s ? Date.parse(s) || 0 : 0);
   const tasks = Object.entries(m.schedule?.runs ?? {})
     .map(([task, runs]) => ({
       task,
@@ -238,20 +266,85 @@ export function toMaintenance(m: RawMaintenanceInfo): KopiaMaintenance {
         end: goTime(r.end),
         success: r.success === true,
         error: r.success === true ? null : (r.error ?? 'failed').slice(0, 2000),
+        details: extraOf(r.extra),
       })),
     }))
     .filter((t) => t.runs.length)
     // By time, not as strings: kopia writes local times with their offset, which changes with daylight saving.
-    .sort((a, b) => Date.parse(b.runs[0]!.start) - Date.parse(a.runs[0]!.start) || a.task.localeCompare(b.task));
+    .sort((a, b) => time(b.runs[0]!.start) - time(a.runs[0]!.start) || a.task.localeCompare(b.task));
+
+  const full = cycle(m.full);
+  const extendObjectLocks = m.extendObjectLocks === true;
+  const lastFullMs = Math.max(0, ...tasks.filter((t) => FULL_TASKS.has(t.task)).map((t) => time(t.runs[0]!.start)));
+  const lastFull = lastFullMs ? new Date(lastFullMs).toISOString() : null;
+  const warnings: KopiaMaintenance['warnings'] = [];
+  const lockNote = objectLock
+    ? ` The Object Lock (${objectLock.mode}, ${objectLock.days} days) is only renewed by full maintenance: once it lapses, blobs still in use are no longer protected.`
+    : '';
+  if (!full.enabled) {
+    warnings.push({
+      level: objectLock ? 'error' : 'warning',
+      text: `Full maintenance is disabled: unused data is never deleted.${lockNote}`,
+    });
+  } else if (!lastFull) {
+    warnings.push({
+      level: 'warning',
+      text: `Full maintenance has never run. It runs on the owner's machine (${m.owner || 'unknown'}) after its interval, during a kopia command or by kopia's server.${lockNote}`,
+    });
+  } else {
+    // Overdue: more than twice the interval (at least two days) since the last full run.
+    const ageMs = now - lastFullMs;
+    const allowedMs = Math.max(2 * (full.intervalSeconds ?? 86_400) * 1000, 2 * DAY_MS);
+    if (ageMs > allowedMs) {
+      const days = Math.floor(ageMs / DAY_MS);
+      const lapse = objectLock && ageMs > objectLock.days * DAY_MS * 0.5;
+      warnings.push({
+        level: lapse ? 'error' : 'warning',
+        text: `Full maintenance has not run for ${days} days (its interval is ${Math.round((full.intervalSeconds ?? 0) / 3600)} h). Is the owner (${m.owner || 'unknown'}) still running kopia?${lockNote}`,
+      });
+    }
+  }
+  // Lock renewal runs at the end of a full cycle: no run since the cycle started means it was
+  // skipped or killed before it recorded anything (failed runs show in the task list anyway).
+  const renewal = tasks.find((t) => t.task === 'extend-blob-retention-time')?.runs[0];
+  const otherFullMs = Math.max(
+    0,
+    ...tasks
+      .filter((t) => FULL_TASKS.has(t.task) && t.task !== 'extend-blob-retention-time')
+      .map((t) => time(t.runs[0]!.start)),
+  );
+  if (objectLock && extendObjectLocks && otherFullMs && (!renewal || time(renewal.start) < otherFullMs - 3_600_000)) {
+    warnings.push({
+      level: 'warning',
+      text: `Object locks were not renewed in the latest full cycle (${new Date(otherFullMs).toISOString().slice(0, 16).replace('T', ' ')} UTC): ${renewal ? `the last renewal ${renewal.success ? 'ran' : 'was attempted'} ${renewal.start.slice(0, 10)}` : 'no renewal has run yet'}. The run may have been interrupted, e.g. a maintenance process or pod stopped before it finished.`,
+    });
+  }
+  if (objectLock && !extendObjectLocks) {
+    warnings.push({
+      level: 'warning',
+      text: `The repository uses Object Lock (${objectLock.mode}, ${objectLock.days} days), but maintenance does not renew it: blobs still in use lose their protection ${objectLock.days} days after they were written. Enable it with \`kopia maintenance set --extend-object-locks true\`.`,
+    });
+  }
+
   return {
     owner: m.owner ?? '',
     quick: cycle(m.quick),
-    full: cycle(m.full),
-    extendObjectLocks: m.extendObjectLocks === true,
+    full,
+    extendObjectLocks,
     nextQuick: goTime(m.schedule?.nextQuickMaintenance),
     nextFull: goTime(m.schedule?.nextFullMaintenance),
     tasks,
+    lastFull,
+    objectLock,
+    warnings,
   };
+}
+
+/** kopia's per-run details, compact; empty objects are dropped. */
+function extraOf(extra: unknown): string | null {
+  if (extra === undefined || extra === null) return null;
+  const s = JSON.stringify(extra);
+  return s === '{}' || s === '[]' || s === 'null' ? null : s.slice(0, 1000);
 }
 
 /** Keeps at most `max` entries, dropping the least recently used. */
@@ -295,6 +388,8 @@ export class Kopia {
   private readonly snapshotsCache = new Map<string, { at: number; list: Promise<KopiaSnapshot[]> }>();
   private readonly maintenanceCache = new Map<string, { at: number; info: Promise<KopiaMaintenance> }>();
   private readonly infoCache = new Map<string, { label: string; value: string }[]>();
+  /** The Object Lock of each repository, read with its status. */
+  private readonly locks = new Map<string, { mode: string; days: number } | null>();
   /** Root object of each listed snapshot, by repository and snapshot ID. */
   private readonly roots = new Map<string, string>();
   private readonly detected = new Map<string, { at: number; is: Promise<boolean> }>();
@@ -565,8 +660,13 @@ export class Kopia {
       let info = this.infoCache.get(r.key);
       if (!info) {
         const password = await this.ready(r);
-        info = repositoryInfo(JSON.parse(await this.exec(r, ['repository', 'status', '--json'], password)));
+        const st = JSON.parse(await this.exec(r, ['repository', 'status', '--json'], password)) as Record<
+          string,
+          unknown
+        >;
+        info = repositoryInfo(st);
         this.infoCache.set(r.key, info);
+        this.locks.set(r.key, objectLockOf(st));
       }
       const { source, warning } = this.passwordInfo(r);
       return { ...base, locked: false, passwordSource: source, warning, repository: info };
@@ -607,6 +707,7 @@ export class Kopia {
   private forgetCaches(r: Repo): void {
     this.snapshotsCache.delete(r.key);
     this.maintenanceCache.delete(r.key);
+    this.locks.delete(r.key);
     this.infoCache.delete(r.key);
     this.dirs.deleteWhere((k) => k.startsWith(`${r.key}\u0000`));
   }
@@ -639,8 +740,16 @@ export class Kopia {
     if (hit && !fresh && Date.now() - hit.at < SNAPSHOT_CACHE_MS) return hit.info;
     const info = (async () => {
       const password = await this.ready(r);
+      if (!this.locks.has(r.key)) {
+        const st = JSON.parse(await this.exec(r, ['repository', 'status', '--json'], password)) as Record<
+          string,
+          unknown
+        >;
+        this.locks.set(r.key, objectLockOf(st));
+      }
       return toMaintenance(
         JSON.parse(await this.exec(r, ['maintenance', 'info', '--json'], password)) as RawMaintenanceInfo,
+        this.locks.get(r.key) ?? null,
       );
     })();
     this.maintenanceCache.set(r.key, { at: Date.now(), info });

@@ -120,9 +120,12 @@ installed where ObjectLens runs (the container image includes it; locally e.g.
   a changed blob corrupts the backups. Deleting the whole folder from its parent stays possible.
 
 **Maintenance** (`kopia maintenance info`): the owner, the quick and full cycles and their next
-runs, whether object locks are renewed, and the last runs of each task (kopia keeps 50 per task),
-with the errors of failed ones. A snapshot can be complete while maintenance fails, e.g. when
-object locks could not be renewed: the card opens by itself when a task's latest run failed.
+runs, the Object Lock and whether maintenance renews it, and the last runs of each task (kopia
+keeps 50 per task), with the errors of failed ones and each run's details on hover. A snapshot
+can be complete while maintenance fails or stops, so ObjectLens also warns when full
+maintenance is overdue, disabled or has never run, when lock renewal is off or was skipped in
+the latest full cycle (an error once Object Lock protection is at risk). The card opens by
+itself when there is a warning or a task's latest run failed.
 
 Listing snapshots and opening a folder take about a second the first time (one kopia process
 each); folders are then cached, since kopia's object IDs are content hashes. Files are streamed

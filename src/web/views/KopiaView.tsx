@@ -336,11 +336,12 @@ function Maintenance({ conn, bucket, prefix }: { conn: ConnectionInfo; bucket: s
   const failures = (info?.tasks ?? [])
     .flatMap((t) => t.runs.filter((r) => !r.success).map((r) => ({ task: t.task, ...r })))
     .sort((a, b) => Date.parse(b.start) - Date.parse(a.start)); // kopia's times carry local offsets
-  const lastFull = info?.tasks.find((t) => t.task === 'snapshot-gc' || t.task === 'full-delete-blobs')?.runs[0];
+  const warnings = info?.warnings ?? [];
+  const worst = warnings.some((w) => w.level === 'error') ? 'error' : warnings.length ? 'warning' : null;
   const label = (task: string) => MAINTENANCE_TASKS[task] ?? task;
 
   return (
-    <details className="card collapsible" open={failing.length > 0 || undefined}>
+    <details className="card collapsible" open={failing.length > 0 || warnings.length > 0 || undefined}>
       <summary>
         <b>Maintenance</b> {!info && !m.error && <span className="muted small">loading…</span>}
         {m.error && <span className="tag tag-error">Unavailable</span>}
@@ -349,6 +350,10 @@ function Maintenance({ conn, bucket, prefix }: { conn: ConnectionInfo; bucket: s
             <span className="tag tag-error" title={failing.map((t) => label(t.task)).join(', ')}>
               {plural(failing.length, 'task')} failed
             </span>
+          ) : worst ? (
+            <span className={`tag ${worst === 'error' ? 'tag-error' : 'tag-warn'}`}>
+              {worst === 'error' ? 'Attention' : plural(warnings.length, 'warning')}
+            </span>
           ) : info.tasks.length ? (
             <span className="tag tag-ok">OK</span>
           ) : (
@@ -356,7 +361,7 @@ function Maintenance({ conn, bucket, prefix }: { conn: ConnectionInfo; bucket: s
           ))}{' '}
         {info && (
           <span className="muted small">
-            {lastFull ? `last full run ${ago(lastFull.start)}` : 'no full run yet'}
+            {info.lastFull ? `last full run ${ago(info.lastFull)}` : 'no full run yet'}
             {!failing.length && failures.length ? ` · ${plural(failures.length, 'earlier failure')}` : ''}
           </span>
         )}
@@ -364,6 +369,12 @@ function Maintenance({ conn, bucket, prefix }: { conn: ConnectionInfo; bucket: s
       {m.error && <ErrorBanner>{m.error.message}</ErrorBanner>}
       {info && (
         <>
+          {warnings.map((w, i) => (
+            <div key={i} className={`banner ${w.level === 'error' ? 'banner-error' : 'banner-warn'}`} role="alert">
+              <Icon name={w.level === 'error' ? 'info' : 'lock'} />
+              <div>{w.text}</div>
+            </div>
+          ))}
           <KV
             rows={[
               ['Owner', <span className="mono">{info.owner || '–'}</span>],
@@ -379,6 +390,8 @@ function Maintenance({ conn, bucket, prefix }: { conn: ConnectionInfo; bucket: s
                   ? `${every(info.full.intervalSeconds)}${info.nextFull ? `, next ${dateTime(info.nextFull)}` : ''}`
                   : 'disabled',
               ],
+              ['Last full run', info.lastFull ? `${dateTime(info.lastFull)} (${ago(info.lastFull)})` : 'never'],
+              ['Object Lock', info.objectLock ? `${info.objectLock.mode}, ${info.objectLock.days} days` : 'none'],
               ['Object lock renewal', info.extendObjectLocks ? 'enabled (at each full cycle)' : 'disabled'],
             ]}
           />
@@ -408,9 +421,14 @@ function Maintenance({ conn, bucket, prefix }: { conn: ConnectionInfo; bucket: s
                         <td>{duration(last.start, last.end)}</td>
                         <td>
                           {last.success ? (
-                            <span className="tag tag-ok">Succeeded</span>
+                            <span className="tag tag-ok" title={last.details ?? undefined}>
+                              Succeeded
+                            </span>
                           ) : (
-                            <span className="tag tag-error" title={last.error ?? undefined}>
+                            <span
+                              className="tag tag-error"
+                              title={[last.error, last.details].filter(Boolean).join('\n') || undefined}
+                            >
                               Failed
                             </span>
                           )}
@@ -445,7 +463,9 @@ function Maintenance({ conn, bucket, prefix }: { conn: ConnectionInfo; bucket: s
                           <div className="muted small">{ago(f.start)}</div>
                         </td>
                         <td>{label(f.task)}</td>
-                        <td className="mono small">{f.error}</td>
+                        <td className="mono small" title={f.details ?? undefined}>
+                          {f.error}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

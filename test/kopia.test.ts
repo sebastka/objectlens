@@ -121,8 +121,83 @@ test('maintenance info is mapped from kopia JSON', () => {
     end: '2026-11-01T04:01:15Z',
     success: false,
     error: 'Failed to extend 7 blobs',
+    details: null,
   });
   assert.equal(m.tasks[0]!.runs[1]!.error, null);
+});
+
+test('maintenance warnings: overdue, disabled, never run, locks not renewed', () => {
+  const now = Date.parse('2026-11-01T12:00:00Z');
+  const run = (start: string) => [{ start, end: start, success: true, extra: { kept: 3 } }];
+  const info = (lastFull: string | null, opts: { full?: boolean; extend?: boolean } = {}) => ({
+    owner: 'root@file',
+    quick: { enabled: true, interval: 3600e9 },
+    full: { enabled: opts.full ?? true, interval: 86400e9 },
+    extendObjectLocks: opts.extend ?? true,
+    schedule: {
+      runs: {
+        'cleanup-logs': run('2026-11-01T11:00:00Z'),
+        ...(lastFull ? { 'snapshot-gc': run(lastFull), 'extend-blob-retention-time': run(lastFull) } : {}),
+      },
+    },
+  });
+  const lock = { mode: 'COMPLIANCE', days: 30 };
+  const levels = (m: ReturnType<typeof toMaintenance>) => m.warnings.map((w) => w.level);
+
+  // Healthy: a full run yesterday, locks renewed.
+  const ok = toMaintenance(info('2026-10-31T12:00:00Z'), lock, now);
+  assert.deepEqual(ok.warnings, []);
+  assert.equal(ok.lastFull, '2026-10-31T12:00:00.000Z');
+  assert.equal(ok.tasks.find((t) => t.task === 'snapshot-gc')!.runs[0]!.details, '{"kept":3}');
+  // Overdue (5 days, interval 24 h): a warning; past half the lock period: an error.
+  assert.deepEqual(levels(toMaintenance(info('2026-10-27T12:00:00Z'), lock, now)), ['warning']);
+  assert.deepEqual(levels(toMaintenance(info('2026-10-10T12:00:00Z'), lock, now)), ['error']);
+  assert.deepEqual(levels(toMaintenance(info('2026-10-10T12:00:00Z'), null, now)), ['warning']);
+  // Never run, and disabled (an error with Object Lock).
+  assert.match(toMaintenance(info(null), null, now).warnings[0]!.text, /never run/);
+  assert.deepEqual(levels(toMaintenance(info(null, { full: false }), lock, now)), ['error']);
+  // Locks that are not renewed.
+  const noExtend = toMaintenance(info('2026-10-31T12:00:00Z', { extend: false }), lock, now);
+  assert.match(noExtend.warnings[0]!.text, /does not renew/);
+  assert.deepEqual(toMaintenance(info('2026-10-31T12:00:00Z', { extend: false }), null, now).warnings, []);
+  // Lock renewal skipped in the latest full cycle (it last ran the day before).
+  const skipped = toMaintenance(
+    {
+      ...info('2026-11-01T02:00:00Z'),
+      schedule: {
+        runs: {
+          'snapshot-gc': run('2026-11-01T02:00:00Z'),
+          'extend-blob-retention-time': [
+            { start: '2026-10-31T02:00:00Z', success: false, error: 'Failed to extend 2 blobs' },
+          ],
+        },
+      },
+    },
+    lock,
+    now,
+  );
+  assert.match(skipped.warnings.map((w) => w.text).join(), /not renewed in the latest full cycle/);
+  const renewed = toMaintenance(
+    {
+      ...info('2026-11-01T02:00:00Z'),
+      schedule: {
+        runs: { 'snapshot-gc': run('2026-11-01T02:00:00Z'), 'extend-blob-retention-time': run('2026-11-01T02:05:00Z') },
+      },
+    },
+    lock,
+    now,
+  );
+  assert.deepEqual(renewed.warnings, []);
+  // A run without a start time sorts last instead of breaking the order.
+  const odd = toMaintenance(
+    { schedule: { runs: { a: [{ success: true }], b: [{ start: '2026-10-01T00:00:00Z', success: true }] } } },
+    null,
+    now,
+  );
+  assert.deepEqual(
+    odd.tasks.map((t) => t.task),
+    ['b', 'a'],
+  );
 });
 
 test('object IDs are validated before reaching the kopia command line', () => {
