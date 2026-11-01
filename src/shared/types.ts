@@ -262,6 +262,8 @@ export interface KopiaMaintenanceRun {
   success: boolean;
   /** kopia's error, when it failed. */
   error: string | null;
+  /** kopia's task-specific details ("extra"), as compact JSON; null when there are none. */
+  details: string | null;
 }
 
 /** A maintenance task and its recent runs, newest first (kopia keeps 50 per task). */
@@ -283,6 +285,12 @@ export interface KopiaMaintenance {
   nextFull: string | null;
   /** Tasks with runs, most recently run first. */
   tasks: KopiaMaintenanceTask[];
+  /** Start of the most recent run of a full-cycle task; null = never. */
+  lastFull: string | null;
+  /** The repository's Object Lock (from `repository status`); null = none. */
+  objectLock: { mode: string; days: number } | null;
+  /** What is wrong even when every run succeeded: maintenance overdue, locks not renewed, … */
+  warnings: { level: 'warning' | 'error'; text: string }[];
 }
 
 export interface KopiaEntry {
