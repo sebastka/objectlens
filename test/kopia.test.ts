@@ -13,8 +13,8 @@ import { promisify } from 'node:util';
 import { after, before, describe, test } from 'node:test';
 import { createApp } from '../src/server/app.ts';
 import { loadConfig } from '../src/server/config.ts';
-import { classify, OBJECT_ID, repositoryInfo, toEntry, toSnapshot } from '../src/server/kopia.ts';
-import type { Capabilities, KopiaBrowse, KopiaSnapshot, KopiaStatus } from '../src/shared/types.ts';
+import { classify, OBJECT_ID, repositoryInfo, toEntry, toMaintenance, toSnapshot } from '../src/server/kopia.ts';
+import type { Capabilities, KopiaBrowse, KopiaMaintenance, KopiaSnapshot, KopiaStatus } from '../src/shared/types.ts';
 
 const run = promisify(execFile);
 
@@ -80,6 +80,49 @@ test('snapshots and entries are mapped from kopia JSON', () => {
   assert.equal(dir.size, 42);
   const file = toEntry({ name: 'f', type: 'f', obj: 'a1', size: 7, mode: '0644' });
   assert.deepEqual([file.size, file.mode], [7, '0644']);
+});
+
+test('maintenance info is mapped from kopia JSON', () => {
+  const m = toMaintenance({
+    owner: 'root@file',
+    quick: { enabled: true, interval: 3600e9 },
+    full: { enabled: true, interval: 86400e9 },
+    extendObjectLocks: true,
+    schedule: {
+      nextFullMaintenance: '2026-11-02T02:00:00Z',
+      nextQuickMaintenance: '0001-01-01T00:00:00Z',
+      runs: {
+        // Local times with an offset, as kopia writes them: 03:00+01:00 is 02:00Z, before 02:04:34Z.
+        'snapshot-gc': [{ start: '2026-11-01T03:00:00+01:00', end: '2026-11-01T03:01:00+01:00', success: true }],
+        'extend-blob-retention-time': [
+          {
+            start: '2026-11-01T02:04:34Z',
+            end: '2026-11-01T04:01:15Z',
+            error: 'Failed to extend 7 blobs',
+          },
+          { start: '2026-10-31T02:00:29Z', end: '2026-10-31T03:27:25Z', success: true },
+        ],
+        'cleanup-logs': null,
+      },
+    },
+  });
+  assert.equal(m.owner, 'root@file');
+  assert.deepEqual(m.full, { enabled: true, intervalSeconds: 86400 });
+  assert.equal(m.extendObjectLocks, true);
+  // Go's zero time means never.
+  assert.equal(m.nextQuick, null);
+  // Most recently run first; tasks without runs left out.
+  assert.deepEqual(
+    m.tasks.map((t) => t.task),
+    ['extend-blob-retention-time', 'snapshot-gc'],
+  );
+  assert.deepEqual(m.tasks[0]!.runs[0], {
+    start: '2026-11-01T02:04:34Z',
+    end: '2026-11-01T04:01:15Z',
+    success: false,
+    error: 'Failed to extend 7 blobs',
+  });
+  assert.equal(m.tasks[0]!.runs[1]!.error, null);
 });
 
 test('object IDs are validated before reaching the kopia command line', () => {
@@ -197,6 +240,8 @@ describe('kopia repository in S3', { skip }, () => {
       'tester',
     ]);
     await kopia(['snapshot', 'create', src]);
+    // A maintenance history to read back (as the owner: the overridden user and host)
+    await kopia(['maintenance', 'run', '--full', '--safety=none']);
     await kopia(['repository', 'disconnect']);
   });
 
@@ -313,5 +358,17 @@ describe('kopia repository in S3', { skip }, () => {
       404,
     );
     await call(a, 'GET', `/api/c/1/b/${bucket}/kopia/browse?prefix=backups/&snapshot=--help`, undefined, 404);
+  });
+
+  test('the maintenance history is read back', async () => {
+    const a = appWith({ S3_1_KOPIA_PASSWORD: password });
+    const m = await call<KopiaMaintenance>(a, 'GET', `/api/c/1/b/${bucket}/kopia/maintenance?prefix=backups/`);
+    assert.equal(m.owner, 'tester@testhost');
+    assert.equal(m.full.enabled, true);
+    const gc = m.tasks.find((t) => t.task === 'snapshot-gc');
+    assert.ok(gc, `tasks: ${m.tasks.map((t) => t.task).join(', ')}`);
+    // At least ours: kopia also runs maintenance by itself after `snapshot create`.
+    assert.ok(gc.runs.length >= 1);
+    assert.deepEqual([gc.runs[0]!.success, gc.runs[0]!.error], [true, null]);
   });
 });

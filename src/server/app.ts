@@ -830,6 +830,10 @@ export function createApp(cfg: Config): Hono<Env> {
     c.json(await kopia.snapshots(...(await kopiaRepo(c, c.req.query('prefix') ?? '')), c.req.query('fresh') === '1')),
   );
 
+  app.get('/api/c/:conn/b/:bucket/kopia/maintenance', async (c) =>
+    c.json(await kopia.maintenance(...(await kopiaRepo(c, c.req.query('prefix') ?? '')), c.req.query('fresh') === '1')),
+  );
+
   app.get('/api/c/:conn/b/:bucket/kopia/browse', async (c) =>
     c.json(
       await kopia.browse(

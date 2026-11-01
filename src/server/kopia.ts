@@ -14,6 +14,8 @@ import { HeadObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import type {
   KopiaBrowse,
   KopiaEntry,
+  KopiaMaintenance,
+  KopiaMaintenanceRun,
   KopiaPasswordSource,
   KopiaSnapshot,
   KopiaStatus,
@@ -199,6 +201,59 @@ export function repositoryInfo(st: Record<string, unknown>): { label: string; va
     .map(([label, v]) => ({ label, value: typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v) }));
 }
 
+interface RawCycle {
+  enabled?: boolean;
+  /** Go's time.Duration: nanoseconds. */
+  interval?: number;
+}
+
+interface RawMaintenanceInfo {
+  owner?: string;
+  quick?: RawCycle;
+  full?: RawCycle;
+  extendObjectLocks?: boolean;
+  schedule?: {
+    nextFullMaintenance?: string;
+    nextQuickMaintenance?: string;
+    runs?: Record<string, { start?: string; end?: string; success?: boolean; error?: string }[] | null>;
+  };
+}
+
+/** Go's zero time ("0001-01-01T00:00:00Z") stands for "never". */
+const goTime = (t: string | undefined): string | null => (t && !t.startsWith('0001-01-01') ? t : null);
+
+const cycle = (c: RawCycle | undefined) => ({
+  enabled: c?.enabled ?? false,
+  intervalSeconds: typeof c?.interval === 'number' && c.interval > 0 ? Math.round(c.interval / 1e9) : null,
+});
+
+/** The parts of `kopia maintenance info --json` worth showing (no log retention, no parallelism). */
+export function toMaintenance(m: RawMaintenanceInfo): KopiaMaintenance {
+  const tasks = Object.entries(m.schedule?.runs ?? {})
+    .map(([task, runs]) => ({
+      task,
+      // kopia keeps them newest first.
+      runs: (runs ?? []).map((r): KopiaMaintenanceRun => ({
+        start: goTime(r.start) ?? '',
+        end: goTime(r.end),
+        success: r.success === true,
+        error: r.success === true ? null : (r.error ?? 'failed').slice(0, 2000),
+      })),
+    }))
+    .filter((t) => t.runs.length)
+    // By time, not as strings: kopia writes local times with their offset, which changes with daylight saving.
+    .sort((a, b) => Date.parse(b.runs[0]!.start) - Date.parse(a.runs[0]!.start) || a.task.localeCompare(b.task));
+  return {
+    owner: m.owner ?? '',
+    quick: cycle(m.quick),
+    full: cycle(m.full),
+    extendObjectLocks: m.extendObjectLocks === true,
+    nextQuick: goTime(m.schedule?.nextQuickMaintenance),
+    nextFull: goTime(m.schedule?.nextFullMaintenance),
+    tasks,
+  };
+}
+
 /** Keeps at most `max` entries, dropping the least recently used. */
 class Lru<V> {
   private readonly map = new Map<string, V>();
@@ -238,6 +293,7 @@ export class Kopia {
   private readonly connected = new Map<string, Promise<void>>();
   private readonly dirs = new Lru<KopiaDirectory>(DIR_CACHE_ENTRIES);
   private readonly snapshotsCache = new Map<string, { at: number; list: Promise<KopiaSnapshot[]> }>();
+  private readonly maintenanceCache = new Map<string, { at: number; info: Promise<KopiaMaintenance> }>();
   private readonly infoCache = new Map<string, { label: string; value: string }[]>();
   /** Root object of each listed snapshot, by repository and snapshot ID. */
   private readonly roots = new Map<string, string>();
@@ -550,6 +606,7 @@ export class Kopia {
 
   private forgetCaches(r: Repo): void {
     this.snapshotsCache.delete(r.key);
+    this.maintenanceCache.delete(r.key);
     this.infoCache.delete(r.key);
     this.dirs.deleteWhere((k) => k.startsWith(`${r.key}\u0000`));
   }
@@ -573,6 +630,22 @@ export class Kopia {
     this.snapshotsCache.set(r.key, { at: Date.now(), list });
     list.catch(() => this.snapshotsCache.delete(r.key));
     return list;
+  }
+
+  /** Maintenance settings and its tasks' recent runs (read from the repository; read-only). */
+  async maintenance(conn: ConnectionConfig, bucket: string, prefix: string, fresh = false): Promise<KopiaMaintenance> {
+    const r = this.repo(conn, bucket, prefix);
+    const hit = this.maintenanceCache.get(r.key);
+    if (hit && !fresh && Date.now() - hit.at < SNAPSHOT_CACHE_MS) return hit.info;
+    const info = (async () => {
+      const password = await this.ready(r);
+      return toMaintenance(
+        JSON.parse(await this.exec(r, ['maintenance', 'info', '--json'], password)) as RawMaintenanceInfo,
+      );
+    })();
+    this.maintenanceCache.set(r.key, { at: Date.now(), info });
+    info.catch(() => this.maintenanceCache.delete(r.key));
+    return info;
   }
 
   private async directory(r: Repo, oid: string): Promise<KopiaDirectory> {
