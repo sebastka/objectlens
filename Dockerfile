@@ -21,7 +21,7 @@
 # ObjectLens has no login: publish the port on 127.0.0.1 only (see README).
 # Images are pinned by digest (multi-arch index); Dependabot keeps them up to date.
 
-FROM --platform=$BUILDPLATFORM dhi.io/node:26-alpine-dev@sha256:393f63498dc3739e4a1cc9e618261927d74663ab023b96b38d29c57199702dc6 AS build
+FROM --platform=$BUILDPLATFORM dhi.io/node:26-alpine-dev@sha256:d17376f42ae43fae1792e91f7e8490c9696a5c5309c99befd99648d03769db57 AS build
 WORKDIR /src
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
@@ -29,7 +29,7 @@ COPY tsconfig.json tsconfig.server.json tsconfig.web.json vite.config.ts ./
 COPY src ./src
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM dhi.io/node:26-alpine-dev@sha256:393f63498dc3739e4a1cc9e618261927d74663ab023b96b38d29c57199702dc6 AS prod-deps
+FROM --platform=$BUILDPLATFORM dhi.io/node:26-alpine-dev@sha256:d17376f42ae43fae1792e91f7e8490c9696a5c5309c99befd99648d03769db57 AS prod-deps
 WORKDIR /src
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --ignore-scripts --no-audit --no-fund
@@ -41,7 +41,7 @@ FROM kopia/kopia:0.23.1@sha256:89fd95ee2942880ca00eae964266958a394421ddbdf69bca6
 FROM scratch AS kopia-bin
 COPY --from=kopia /usr/bin/kopia /kopia
 
-FROM dhi.io/node:26-alpine@sha256:5c86dab3a84b76e8ae134d04adf87bd23c5356a4d24f2005f57aa0aa305d7773 AS runtime
+FROM dhi.io/node:26-alpine@sha256:732b7f53f1a10df0c4e8ded0af55fadb6c0c778c987d2c855755b72a1cc85a86 AS runtime
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="objectlens" \
       org.opencontainers.image.description="Web file explorer for S3-compatible object storage" \
